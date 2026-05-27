@@ -67,3 +67,8 @@ scratch/
 
 # Notebook outputs (keep .ipynb but strip outputs in CI ideally)
 *.ipynb_meta
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
