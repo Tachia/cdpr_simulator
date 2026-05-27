@@ -31,21 +31,23 @@ jobs:
 
       - name: Install cdpr + dev + viz + data + api extras
         run: |
-          python -m pip install --upgrade pip wheel
-          # Skip torch/sb3/mujoco in CI --- they're heavy and tested separately
-          # via the smoke scripts on the developer machine.
-          pip install -e ".[dev,viz,data,api]"
+          python -m pip install --upgrade pip wheel setuptools
+          # --prefer-binary keeps pip from compiling scipy / matplotlib
+          # from source on the Ubuntu runner (which can OOM on the free
+          # GH Actions worker). Same fix as for the Render Docker build.
+          # Torch / SB3 / MuJoCo extras are skipped in CI --- they're
+          # exercised by the smoke scripts on the developer machine.
+          python -m pip install --prefer-binary -e ".[dev,viz,data,api]"
 
       - name: Lint (ruff)
-        run: |
-          ruff check src tests
-        continue-on-error: true   # Phase-8 cleanup pending
+        run: ruff check src tests
+        continue-on-error: true   # not a gate; Phase-8 cleanup pending
 
       - name: Run pytest
         env:
           MPLBACKEND: Agg
         run: |
-          pytest tests/ -q \
+          python -m pytest tests/ -q \
             --ignore=tests/test_learn_env.py \
             --ignore=tests/test_learn_supervised.py \
             --ignore=tests/test_learn_benchmark.py \
