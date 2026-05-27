@@ -1,0 +1,22 @@
+# Supabase CLI project link --- runs:
+#   supabase link --project-ref nohbtlhhisfiajjsbguy
+#   supabase db push          # applies everything under supabase/migrations/
+#
+# This file is committed to the repo so any clone can rebuild the schema
+# without having to remember the project ref.
+
+project_id = "nohbtlhhisfiajjsbguy"
+
+[db]
+# Postgres major version Supabase provisions. Match what the project is on.
+major_version = 15
+
+[api]
+# Defaults are fine; documented here for reference.
+enabled = true
+port = 54321
+schemas = ["public"]
+extra_search_path = ["public", "extensions"]
+
+[studio]
+enabled = true

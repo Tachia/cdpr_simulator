@@ -193,6 +193,8 @@ def record_simulation(
     notes: str | None = None,
     condition_numbers: NDArray[np.float64] | None = None,
     tension_residuals: NDArray[np.float64] | None = None,
+    mirror_to_supabase: bool | None = None,
+    supabase_metrics: dict[str, float] | None = None,
 ) -> ExperimentLog:
     """Persist a complete simulation as a recording directory.
 
@@ -244,10 +246,28 @@ def record_simulation(
         tension_residuals=tension_residuals,
     )
 
-    return ExperimentLog(
+    log = ExperimentLog(
         root=root,
         metadata_path=metadata_path,
         timeseries_path=timeseries_path,
         diagnostics_path=diagnostics_path,
         manifest_path=manifest_path,
     )
+
+    # Optional Supabase mirror: writes a single row to the experiments
+    # table when SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY are set in the
+    # environment (or when ``mirror_to_supabase=True`` forces an attempt).
+    # The local artefact bundle is the source of truth --- a failed
+    # mirror never raises and never blocks the return.
+    should_mirror = mirror_to_supabase
+    if should_mirror is None:
+        from cdpr.storage.supabase import supabase_available
+        should_mirror = supabase_available()
+    if should_mirror:
+        try:
+            from cdpr.storage.supabase import mirror_experiment
+            mirror_experiment(log, metrics=supabase_metrics, extra_tags=dict(tags or {}))
+        except Exception:                                       # pragma: no cover - mirror is best-effort
+            pass
+
+    return log
