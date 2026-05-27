@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>cdpr — Cable-Driven Parallel Robot research framework</title>
+<style>
+  :root { color-scheme: light dark; }
+  html { font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { max-width: 64ch; margin: 3rem auto; padding: 0 1.2rem; }
+  header h1 { margin: 0 0 .2em; font-size: 1.8rem; }
+  header p { color: #555; }
+  h2 { margin-top: 2.4rem; border-bottom: 1px solid #ddd; padding-bottom: .2em; }
+  h3 { margin-top: 1.6rem; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  code { background: #f3f3f5; padding: .1em .35em; border-radius: 4px; font-size: .92em; }
+  pre { background: #f3f3f5; padding: 1em; overflow-x: auto; border-radius: 6px; }
+  table { width: 100%; border-collapse: collapse; margin: 1em 0; }
+  th, td { text-align: left; padding: .45em .8em; border-bottom: 1px solid #eee; }
+  a { color: #0a58ca; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #111418; color: #d8dde3; }
+    code, pre { background: #1a1f26; }
+    header p { color: #9aa1ab; }
+    h2 { border-color: #2b3038; }
+    th, td { border-color: #2b3038; }
+    a { color: #7fb2ff; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>cdpr</h1>
+  <p>A hybrid physics-driven and data-driven research framework for
+     <strong>Cable-Driven Parallel Robots</strong>.</p>
+</header>
+
+<p>
+  Software contribution of an Innopolis PhD dissertation
+  (M. J. Tachia / Joseph Mfeuter, Programme 1.2.2). The scientific core
+  is self-contained NumPy / SciPy; PyTorch, Stable-Baselines3, MuJoCo,
+  PyBullet, ROS 2 and Gazebo are optional adapters.
+</p>
+
+<p>
+  <strong>Repository:</strong>
+  <a href="https://github.com/Tachia/cdpr_simulator">github.com/Tachia/cdpr_simulator</a>
+</p>
+
+<h2>What it does</h2>
+
+<p>
+  The framework spans seven phases of capability, all developed and tested
+  together:
+</p>
+
+<ol>
+  <li><strong>Phase 1.</strong> Scientific core — kinematics, structure
+      matrix, tension distribution, three per-cable physics, dynamics,
+      workspace, trajectories.</li>
+  <li><strong>Phase 2.</strong> Visualisation + ingestion + reports +
+      FastAPI + Streamlit.</li>
+  <li><strong>Phase 3.</strong> Experimental-data ingestion pipeline with
+      MAD outlier detection, SLERP-correct resampling, validation against
+      the dynamic model.</li>
+  <li><strong>Phase 4.</strong> Gymnasium env + SB3 PPO / SAC / TD3
+      wrappers + supervised inverse-dynamics MLP + Newton-Euler-residual
+      PINN.</li>
+  <li><strong>Phase 5.</strong> External-physics adapters (MuJoCo,
+      PyBullet, ROS 2 transport, Gazebo / Isaac Sim stubs) with
+      cross-engine verification.</li>
+  <li><strong>Phase 6.</strong> Closed-loop control layer, model
+      identification, reproducible experiment bundles, dissertation-ready
+      report bundles, scenario hashing.</li>
+  <li><strong>Phase 7.</strong> Three mutually exclusive cable
+      constitutive laws — Kelvin–Voigt, Irvine catenary, SQCK hybrid —
+      selectable at runtime through the simulator, benchmarks, and
+      reports.</li>
+</ol>
+
+<h2>Install</h2>
+
+<pre><code>git clone https://github.com/Tachia/cdpr_simulator
+cd cdpr_simulator
+pip install -e ".[dev,viz,data,api,gui]"
+</code></pre>
+
+<h3>Run the test suite</h3>
+
+<pre><code>pytest tests/        # 195 tests, ~52 s</code></pre>
+
+<h3>Launch the services</h3>
+
+<pre><code># FastAPI backend
+uvicorn cdpr.interface.api:app --host 0.0.0.0 --port 8000
+
+# Streamlit console (separate terminal)
+streamlit run streamlit_app.py
+</code></pre>
+
+<h2>Architecture (deployment)</h2>
+
+<table>
+  <tr><th>Layer</th><th>Hosting</th><th>Source</th></tr>
+  <tr><td>FastAPI backend</td><td>Render</td><td><code>Dockerfile</code> + <code>render.yaml</code></td></tr>
+  <tr><td>Streamlit console</td><td>Streamlit Community Cloud</td><td><code>streamlit_app.py</code></td></tr>
+  <tr><td>Static docs</td><td>Cloudflare Pages</td><td><code>docs/</code></td></tr>
+  <tr><td>Persistent storage</td><td>Supabase (optional)</td><td><code>supabase/schema.sql</code></td></tr>
+  <tr><td>Local physics</td><td>MuJoCo on the dev machine</td><td><code>cdpr.adapters.mujoco</code></td></tr>
+  <tr><td>CI</td><td>GitHub Actions</td><td><code>.github/workflows/ci.yml</code></td></tr>
+</table>
+
+<p>
+  See <a href="deployment.html">deployment.html</a> for the connection map
+  and the step-by-step setup guide.
+</p>
+
+<h2>Citing</h2>
+
+<p>
+  If you use this framework in published work, please cite the
+  dissertation (forthcoming).
+</p>
+
+<footer style="margin-top:3rem;color:#777;font-size:.92em">
+  <p>MIT-licensed. Hosted on Cloudflare Pages from the
+     <a href="https://github.com/Tachia/cdpr_simulator">main branch</a>.</p>
+</footer>
+
+</body>
+</html>

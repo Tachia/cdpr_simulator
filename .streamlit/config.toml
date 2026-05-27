@@ -1,0 +1,19 @@
+# Streamlit theme + server tuning for the cdpr research console.
+# Picked up automatically by `streamlit run` and by Streamlit
+# Community Cloud (which reads ./.streamlit/config.toml).
+
+[theme]
+base = "light"
+primaryColor = "#0072B2"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F2F3F5"
+textColor = "#1A1F2C"
+font = "serif"
+
+[server]
+headless = true
+fileWatcherType = "auto"
+maxUploadSize = 100   # MB --- accommodates experimental log XLSX/CSV uploads
+
+[browser]
+gatherUsageStats = false

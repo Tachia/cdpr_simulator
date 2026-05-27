@@ -1,0 +1,33 @@
+# Render blueprint for the cdpr FastAPI backend.
+#
+# How to use:
+#   1. Push this repo to GitHub.
+#   2. In the Render dashboard:  New + → Blueprint → connect this repo →
+#      Render auto-discovers this file and provisions the service below.
+#   3. Add any secret env vars (Supabase keys) under the service's
+#      "Environment" tab; non-secret ones are pinned here.
+#
+# Free plan note:
+#   - `plan: free` is documented but Render may rename the tier;
+#     adjust if their UI offers a different free / hobby option.
+#   - Free instances sleep after inactivity. The /health endpoint
+#     keeps cold-starts cheap.
+
+services:
+  - type: web
+    name: cdpr-api
+    runtime: docker
+    plan: free
+    autoDeploy: true                  # redeploy on every push to main
+    branch: main
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: CDPR_API_CORS_ORIGINS
+        # Updated after the Streamlit URL is known.
+        value: "*"
+      - key: SUPABASE_URL
+        sync: false                   # populated by hand in Render UI
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false                   # populated by hand in Render UI

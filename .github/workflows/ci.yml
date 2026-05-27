@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest + ruff
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install cdpr + dev + viz + data + api extras
+        run: |
+          python -m pip install --upgrade pip wheel
+          # Skip torch/sb3/mujoco in CI --- they're heavy and tested separately
+          # via the smoke scripts on the developer machine.
+          pip install -e ".[dev,viz,data,api]"
+
+      - name: Lint (ruff)
+        run: |
+          ruff check src tests
+        continue-on-error: true   # Phase-8 cleanup pending
+
+      - name: Run pytest
+        env:
+          MPLBACKEND: Agg
+        run: |
+          pytest tests/ -q \
+            --ignore=tests/test_learn_env.py \
+            --ignore=tests/test_learn_supervised.py \
+            --ignore=tests/test_learn_benchmark.py \
+            --ignore=tests/test_learn_rl_factories.py \
+            --ignore=tests/test_adapters_mujoco.py
+        # ^ skip extras-only tests in CI to keep the matrix lean; the
+        #   developer environment runs the full 195-test suite locally.

@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>cdpr — deployment guide</title>
+<style>
+  :root { color-scheme: light dark; }
+  html { font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { max-width: 72ch; margin: 3rem auto; padding: 0 1.2rem; }
+  h1 { font-size: 1.7rem; }
+  h2 { margin-top: 2.2rem; border-bottom: 1px solid #ddd; padding-bottom: .2em; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  code { background: #f3f3f5; padding: .1em .35em; border-radius: 4px; font-size: .92em; }
+  pre { background: #f3f3f5; padding: 1em; overflow-x: auto; border-radius: 6px; line-height: 1.45; }
+  table { width: 100%; border-collapse: collapse; margin: 1em 0; }
+  th, td { text-align: left; padding: .45em .8em; border-bottom: 1px solid #eee; vertical-align: top; }
+  a { color: #0a58ca; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #111418; color: #d8dde3; }
+    code, pre { background: #1a1f26; }
+    h2 { border-color: #2b3038; }
+    th, td { border-color: #2b3038; }
+    a { color: #7fb2ff; }
+  }
+</style>
+</head>
+<body>
+
+<p><a href="index.html">← back to overview</a></p>
+
+<h1>Deployment guide</h1>
+
+<p>Connection map for the cdpr framework. The local checkout is the
+development workspace; GitHub is the source of truth; each external
+service redeploys from a single watched branch.</p>
+
+<pre><code>                    ┌────────────────────────────────────────────────┐
+                    │                Local dev machine                │
+                    │  ── editor + pytest + smoke_phase*.py + git ── │
+                    └───────────────────────┬────────────────────────┘
+                                            │ git push
+                                            ▼
+            ┌─────────────────────────────────────────────────────────┐
+            │   GitHub:  Tachia/cdpr_simulator   (branch: main)       │
+            │   CI:  .github/workflows/ci.yml   (lint + pytest)       │
+            └──┬──────────────┬─────────────────┬────────────────┬────┘
+               │              │                 │                │
+        webhook ▼       webhook ▼          webhook ▼          webhook ▼
+   ┌──────────────────┐ ┌──────────────┐ ┌────────────────┐ ┌─────────────┐
+   │  Render          │ │  Streamlit   │ │  Cloudflare    │ │  Supabase   │
+   │  cdpr-api        │ │  Community   │ │  Pages         │ │  (optional) │
+   │  FastAPI         │ │  Cloud       │ │  docs/         │ │  metadata   │
+   │  Dockerfile      │ │  streamlit_  │ │  index.html    │ │  + uploads  │
+   │  render.yaml     │ │  app.py      │ │                │ │             │
+   └──────────────────┘ └──────────────┘ └────────────────┘ └─────────────┘
+            │                    │                                    ▲
+            │ /simulate /workspace /plot /robots /health              │
+            └────────────────────►◄─────────────────────────────────┘
+</code></pre>
+
+<h2>What lives where</h2>
+
+<table>
+  <tr><th>Layer</th><th>Hosting</th><th>What's needed</th></tr>
+  <tr><td>FastAPI backend</td><td>Render (Docker web service)</td><td>Render account; connect to the GitHub repo; first deploy uses <code>render.yaml</code></td></tr>
+  <tr><td>Streamlit console</td><td>Streamlit Community Cloud</td><td>Streamlit account (free); point at <code>streamlit_app.py</code>, set <code>CDPR_BACKEND_URL</code> to the Render URL</td></tr>
+  <tr><td>Static docs</td><td>Cloudflare Pages</td><td>Cloudflare account; connect the repo; output directory <code>docs/</code>; no build command</td></tr>
+  <tr><td>Storage</td><td>Supabase (optional)</td><td>Supabase project; copy URL + service-role key into Render env</td></tr>
+  <tr><td>Local physics</td><td>MuJoCo on the dev machine</td><td><code>pip install mujoco</code></td></tr>
+  <tr><td>CI</td><td>GitHub Actions</td><td>Configured at <code>.github/workflows/ci.yml</code></td></tr>
+</table>
+
+<h2>Render — FastAPI backend</h2>
+<ol>
+  <li>Sign in at <a href="https://dashboard.render.com">dashboard.render.com</a>.</li>
+  <li><strong>New +</strong> → <strong>Blueprint</strong> → connect this repo.</li>
+  <li>Render reads <code>render.yaml</code> and proposes the <code>cdpr-api</code> web service.</li>
+  <li>Confirm the build (Docker) and the <code>/health</code> check.</li>
+  <li>Copy the public URL into the Streamlit env as <code>CDPR_BACKEND_URL</code>.</li>
+</ol>
+
+<h2>Streamlit Community Cloud — research console</h2>
+<ol>
+  <li>Sign in at <a href="https://share.streamlit.io">share.streamlit.io</a>.</li>
+  <li><strong>New app</strong> → this repo / <code>main</code> / <code>streamlit_app.py</code>.</li>
+  <li>Under <strong>Advanced settings → Secrets</strong>, set <code>CDPR_BACKEND_URL</code>.</li>
+</ol>
+
+<h2>Cloudflare Pages — docs</h2>
+<ol>
+  <li>Sign in at <a href="https://dash.cloudflare.com">dash.cloudflare.com</a> → Workers & Pages.</li>
+  <li>Create Pages application → Connect to Git → this repo.</li>
+  <li>Framework preset: <strong>None</strong>; build command: empty; output dir: <code>docs</code>.</li>
+</ol>
+
+<h2>Supabase — persistent storage (optional)</h2>
+<ol>
+  <li>Sign in at <a href="https://supabase.com">supabase.com</a> → New project.</li>
+  <li>SQL editor → run <code>supabase/schema.sql</code>.</li>
+  <li>Copy project URL + service-role key into Render env.</li>
+</ol>
+
+<h2>Development loop</h2>
+<pre><code>edit src/cdpr/...
+pytest tests/
+git add ... && git commit
+git push      # → GitHub Actions, Render, Streamlit, Cloudflare all rebuild
+</code></pre>
+
+</body>
+</html>
