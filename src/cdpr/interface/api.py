@@ -98,6 +98,32 @@ def _serialise_result(result: "SimulationResult") -> dict[str, object]:
 # Endpoints
 # ---------------------------------------------------------------------------
 
+@app.get("/")
+def root() -> dict[str, object]:
+    """Service descriptor returned when the root URL is hit in a browser.
+
+    Lists the available endpoints + points the visitor at the OpenAPI
+    docs. The actual API surface is the other ``@app.<method>`` routes
+    below --- this is a friendly landing page, not the API itself.
+    """
+    return {
+        "name": "cdpr",
+        "version": app.version,
+        "summary": app.summary,
+        "endpoints": {
+            "health":     "GET  /health",
+            "robots":     "GET  /robots",
+            "simulate":   "POST /simulate",
+            "workspace":  "POST /workspace",
+            "plot":       "POST /plot",
+            "openapi":    "GET  /openapi.json",
+            "swagger_ui": "GET  /docs",
+            "redoc":      "GET  /redoc",
+        },
+        "repository": "https://github.com/Tachia/cdpr_simulator",
+    }
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
