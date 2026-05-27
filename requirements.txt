@@ -1,0 +1,25 @@
+# Lean install for hosts that prefer pip + requirements.txt over pyproject
+# extras (notably Streamlit Community Cloud, whose Poetry-based installer
+# chokes on pyproject extras that reference each other).
+#
+# Local development still uses the canonical:
+#     pip install -e ".[dev,viz,data,api,gui]"
+#
+# What's in here = what the deployed Streamlit research console needs.
+
+streamlit>=1.32
+
+# Backend wire (the GUI calls the FastAPI service over HTTP).
+httpx>=0.27
+
+# Visualisation + ingestion + scientific core deps.
+matplotlib>=3.8
+pillow>=10.0
+pandas>=2.1
+openpyxl>=3.1
+numpy>=1.24
+scipy>=1.11
+
+# Install the cdpr package itself --- hatchling builds from pyproject.toml.
+# (no extras listed: this file already names everything the GUI needs)
+.
