@@ -77,7 +77,7 @@ from cdpr.interface.specs import (                               # noqa: E402
 # Build-id banner: lets the user tell instantly whether Streamlit Cloud
 # is serving the latest commit or a stale cached worker. Bump when the
 # behavioural contract of this file changes.
-BUILD_ID = "gui-2026-05-28-d"
+BUILD_ID = "gui-2026-05-28-e"
 
 # Frugal mode trims the *simulator* workload to keep the integration
 # cheap on the free tier (1 GB / 1 vCPU). Plot rendering is already
@@ -511,12 +511,26 @@ def _plot_scene_3d(result, robot):
 # ---------------------------------------------------------------------------
 
 def _upload_panel() -> None:
+    """Phase-2 surface: peek at an uploaded log, then optionally run a
+    quick analysis (replay / PINN) inline.
+
+    The heavy lifting goes through the same code path the PowerShell CLI
+    uses (see ``scripts/train_from_csv.py``), so the web and terminal
+    workflows produce identical artifacts. We deliberately keep the
+    inline workload tiny --- a 30-epoch supervised fit on a one-second
+    simulation log finishes in under a second of CPU --- so the free
+    Streamlit Cloud worker is not pushed past its memory ceiling.
+    """
     st.divider()
-    st.subheader("Experimental log")
+    st.subheader("Phase 2 — upload an experimental log")
     uploaded = st.file_uploader(
         "Drop a CSV / XLSX experimental log",
         type=["csv", "xlsx", "xls"],
-        help="The file is parsed with pandas and the head is shown below.",
+        help=(
+            "Expects the column layout written by scripts/run_simulation.py: "
+            "t, px/py/pz, qx/qy/qz/qw, vx/vy/vz, wx/wy/wz, L1..Lm, T1..Tm. "
+            "Other CSVs will still preview here but the analysis buttons will skip."
+        ),
         key="upload_file",
     )
     if uploaded is None:
@@ -529,9 +543,216 @@ def _upload_panel() -> None:
             df = pd.read_csv(io.BytesIO(raw))
         st.write(f"Loaded **{uploaded.name}** with shape {df.shape}.")
         st.dataframe(df.head(50), height=300)
+        st.session_state["_uploaded_df"] = df
     except Exception as exc:
         _log(f"Upload parse failed: {type(exc).__name__}: {exc}")
         st.error(f"Failed to parse uploaded file: {type(exc).__name__}: {exc}")
+        st.exception(exc)
+        return
+
+    cols = st.columns([1, 1, 1, 3])
+    if cols[0].button("Quick PINN fit", key="btn_pinn"):
+        _run_quick_pinn(df)
+    if cols[1].button("Quick replay", key="btn_replay"):
+        _run_quick_replay(df)
+    if cols[2].button("Clear analysis", key="btn_clear_analysis"):
+        for k in ("_pinn_fig", "_pinn_metrics", "_replay_fig", "_replay_metrics"):
+            st.session_state.pop(k, None)
+        st.rerun()
+
+    # Persistent display of the most recent analysis figures.
+    if "_pinn_fig" in st.session_state:
+        st.write("**Quick PINN fit**")
+        st.pyplot(st.session_state["_pinn_fig"], clear_figure=False)
+        st.json(st.session_state.get("_pinn_metrics", {}))
+    if "_replay_fig" in st.session_state:
+        st.write("**Quick replay**")
+        st.pyplot(st.session_state["_replay_fig"], clear_figure=False)
+        st.json(st.session_state.get("_replay_metrics", {}))
+
+
+def _run_quick_pinn(df: "pd.DataFrame") -> None:
+    """Inline PINN fit: <1 s of CPU, fits within free-tier memory."""
+    try:
+        import importlib.util
+        if importlib.util.find_spec("torch") is None:
+            st.warning(
+                "PyTorch is not installed in this Streamlit Cloud environment. "
+                "Use `python scripts/train_from_csv.py --model pinn ...` locally instead."
+            )
+            return
+        import matplotlib.pyplot as plt
+        import torch
+
+        # Build (X, y) from the standard CSV layout.
+        need = {"t", "px", "py", "pz", "qx", "qy", "qz", "qw",
+                "vx", "vy", "vz", "wx", "wy", "wz"}
+        if not need.issubset(df.columns):
+            st.warning(
+                "This CSV does not have the standard run_simulation.py layout "
+                f"(missing {sorted(need - set(df.columns))}). PINN fit skipped."
+            )
+            return
+        t = df["t"].to_numpy(dtype=np.float64)
+        pos = df[["px", "py", "pz"]].to_numpy(dtype=np.float64)
+        quat = df[["qx", "qy", "qz", "qw"]].to_numpy(dtype=np.float64)
+        lin_v = df[["vx", "vy", "vz"]].to_numpy(dtype=np.float64)
+        ang_v = df[["wx", "wy", "wz"]].to_numpy(dtype=np.float64)
+        lin_a = np.gradient(lin_v, t, axis=0)
+        ang_a = np.gradient(ang_v, t, axis=0)
+        X = np.concatenate([pos, quat, lin_v, ang_v, lin_a, ang_a], axis=1).astype(np.float32)
+
+        tension_cols = sorted([c for c in df.columns if c.startswith("T")
+                              and c[1:].isdigit()], key=lambda s: int(s[1:]))
+        if not tension_cols:
+            st.warning("No tension columns (T1, T2, …) found in CSV.")
+            return
+        y = df[tension_cols].to_numpy(dtype=np.float32)
+
+        n_train = max(2, int(0.8 * len(X)))
+        Xtr, ytr = X[:n_train], y[:n_train]
+        Xva, yva = X[n_train:], y[n_train:]
+
+        x_mu = torch.tensor(Xtr.mean(0)); x_sd = torch.tensor(Xtr.std(0) + 1e-8)
+        y_mu = torch.tensor(ytr.mean(0)); y_sd = torch.tensor(ytr.std(0) + 1e-8)
+
+        net = torch.nn.Sequential(
+            torch.nn.Linear(X.shape[1], 64), torch.nn.Tanh(),
+            torch.nn.Linear(64, 64),         torch.nn.Tanh(),
+            torch.nn.Linear(64, y.shape[1]),
+        )
+        opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+        Xtr_t = (torch.tensor(Xtr) - x_mu) / x_sd
+        ytr_t = (torch.tensor(ytr) - y_mu) / y_sd
+        Xva_t = (torch.tensor(Xva) - x_mu) / x_sd if len(Xva) else None
+        yva_t = (torch.tensor(yva) - y_mu) / y_sd if len(yva) else None
+
+        losses_tr, losses_va = [], []
+        with st.spinner("Training PINN (30 epochs)…"):
+            for _epoch in range(30):
+                net.train()
+                yhat = net(Xtr_t)
+                loss = torch.mean((yhat - ytr_t) ** 2)
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                opt.step()
+                losses_tr.append(float(loss.detach()))
+                if Xva_t is not None and len(Xva_t):
+                    net.eval()
+                    with torch.no_grad():
+                        losses_va.append(float(torch.mean((net(Xva_t) - yva_t) ** 2)))
+        net.eval()
+        with torch.no_grad():
+            yhat_norm = net((torch.tensor(X) - x_mu) / x_sd)
+            yhat = (yhat_norm * y_sd + y_mu).numpy()
+
+        rmse_n = float(np.sqrt(np.mean((yhat - y) ** 2)))
+        mae_n = float(np.mean(np.abs(yhat - y)))
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10.0, 3.5))
+        ax1.plot(losses_tr, label="train")
+        if losses_va:
+            ax1.plot(losses_va, label="val")
+        ax1.set_yscale("log")
+        ax1.set_xlabel("epoch"); ax1.set_ylabel("MSE (normalised)")
+        ax1.set_title("PINN training loss")
+        ax1.legend()
+        for k in range(y.shape[1]):
+            ax2.plot(t, y[:, k], color=f"C{k % 10}", alpha=0.4)
+            ax2.plot(t, yhat[:, k], color=f"C{k % 10}", linestyle="--")
+        ax2.set_xlabel(r"time $t$ [s]"); ax2.set_ylabel("cable tension [N]")
+        ax2.set_title("Prediction (dashed) vs truth (solid)")
+        st.session_state["_pinn_fig"] = fig
+        st.session_state["_pinn_metrics"] = {
+            "rmse_N": rmse_n, "mae_N": mae_n,
+            "train_loss_last": losses_tr[-1],
+            "val_loss_last": losses_va[-1] if losses_va else None,
+            "samples": int(len(t)), "cables": int(y.shape[1]),
+        }
+        st.toast(f"PINN fit done — RMSE {rmse_n:.3g} N")
+        st.rerun()
+    except Exception as exc:
+        _log(f"_run_quick_pinn crashed: {type(exc).__name__}: {exc}")
+        st.error(f"Quick PINN fit failed: {type(exc).__name__}: {exc}")
+        st.exception(exc)
+
+
+def _run_quick_replay(df: "pd.DataFrame") -> None:
+    """Inline replay: integrate the recorded trajectory against the
+    analytic Phase-1 model, plot tension residuals."""
+    try:
+        import matplotlib.pyplot as plt
+        from scipy.spatial.transform import Rotation as _R
+        from cdpr.dynamics.simulator import simulate as _simulate
+        from cdpr.dynamics.rigid_body import PlatformState as _PS
+        from cdpr.interface.specs import (
+            SimulationRequest as _Req, TrajectorySpec as _Tspec,
+            build_robot as _br, build_trajectory as _bt,
+        )
+
+        # Use the request currently configured in the sidebar as the
+        # closest analytic match for the uploaded trajectory. The user
+        # uploaded a CSV; without a sibling manifest.json we cannot know
+        # which robot it came from, so we replay the sidebar selection.
+        req = _Req(
+            robot=st.session_state.get("robot", "ipanema_class"),
+            payload_mass=float(st.session_state.get("payload_mass", 0.0)),
+            gravity=(0.0, 0.0, -9.81 if st.session_state.get("gravity_on", True) else 0.0),
+            tension_objective=st.session_state.get("objective", "centered"),
+            duration=float(st.session_state.get("duration", 0.5)),
+            dt=float(st.session_state.get("dt", 5e-3)),
+            trajectory=_Tspec(kind=st.session_state.get("kind", "circle"),
+                              duration=float(st.session_state.get("duration", 0.5)),
+                              params={"center": [0, 0, 0.5], "radius": 0.2,
+                                      "axis": [0, 0, 1], "angle_span": float(2 * np.pi)}),
+        )
+        robot = _br(req.robot, payload_mass=req.payload_mass)
+        ref = _bt(req.trajectory)
+        p0 = ref(0.0).position
+        state0 = _PS.at_rest(Pose(position=p0, rotation=_R.identity()))
+        sim = _simulate(
+            robot=robot, state0=state0, duration=req.duration, dt=req.dt,
+            reference=ref, tension_objective=req.tension_objective, gravity=req.gravity,
+        )
+
+        # Compare cable tensions on the time grid the user uploaded.
+        t_csv = df["t"].to_numpy()
+        tension_cols = sorted([c for c in df.columns if c.startswith("T")
+                              and c[1:].isdigit()], key=lambda s: int(s[1:]))
+        if not tension_cols:
+            st.warning("No tension columns in CSV; cannot replay-compare.")
+            return
+        T_csv = df[tension_cols].to_numpy()
+        T_rep = np.asarray(sim.cable_tensions)
+        t_rep = np.asarray(sim.time)
+        # Interpolate CSV onto sim time
+        T_csv_i = np.column_stack([
+            np.interp(t_rep, t_csv, T_csv[:, k]) for k in range(T_csv.shape[1])
+        ]) if T_csv.shape[1] == T_rep.shape[1] else None
+
+        fig, ax = plt.subplots(figsize=(8.0, 3.5))
+        for k in range(T_rep.shape[1]):
+            ax.plot(t_rep, T_rep[:, k], color=f"C{k % 10}", alpha=0.5,
+                    label=f"replay c{k+1}" if k < 1 else None)
+            if T_csv_i is not None:
+                ax.plot(t_rep, T_csv_i[:, k], color=f"C{k % 10}",
+                        linestyle="--", label=f"CSV c{k+1}" if k < 1 else None)
+        ax.set_xlabel(r"time $t$ [s]"); ax.set_ylabel("cable tension [N]")
+        ax.set_title("Sidebar replay (solid) vs uploaded CSV (dashed)")
+        ax.legend(loc="best")
+        st.session_state["_replay_fig"] = fig
+        rmse = float(np.sqrt(np.mean((T_rep - T_csv_i) ** 2))) if T_csv_i is not None else None
+        st.session_state["_replay_metrics"] = {
+            "samples": int(len(t_rep)),
+            "tension_rmse_N": rmse,
+            "n_cables": int(T_rep.shape[1]),
+            "csv_cables": int(T_csv.shape[1]),
+        }
+        st.toast("Replay done.")
+        st.rerun()
+    except Exception as exc:
+        _log(f"_run_quick_replay crashed: {type(exc).__name__}: {exc}")
+        st.error(f"Replay failed: {type(exc).__name__}: {exc}")
         st.exception(exc)
 
 

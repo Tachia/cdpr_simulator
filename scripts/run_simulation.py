@@ -243,12 +243,22 @@ def save_timeseries_csv(out_dir: Path, result) -> Path:
 # ---------------------------------------------------------------------------
 
 def render_plots(out_dir: Path, result, robot, reference) -> dict[str, str]:
+    """Produce the publication-grade plot bundle for one simulation run.
+
+    Twelve figures total when a reference trajectory is supplied --- the
+    directive's ten-figure minimum plus the trajectory projection trio
+    and the cumulative-RMS evolution curve. Plot factories already live
+    in :mod:`cdpr.viz.plots2d`; this dispatcher composes them and adds
+    the few derived plots (acceleration, RMS evolution) that need a
+    bespoke computation.
+    """
     try:
         from cdpr.viz.style import apply_paper_style
         apply_paper_style()
     except Exception:                                              # pragma: no cover
         pass
 
+    import matplotlib.pyplot as plt
     from cdpr.viz import plots2d
     from cdpr.viz.scene import SceneOptions, render_scene
 
@@ -259,18 +269,92 @@ def render_plots(out_dir: Path, result, robot, reference) -> dict[str, str]:
         try:
             fig = fn()
             fig.savefig(path, dpi=160, bbox_inches="tight")
+            plt.close(fig)                                          # release memory
             outcomes[name] = "ok"
-            print(f"  [{name:18s}] -> {path.resolve()}")
+            print(f"  [{name:22s}] -> {path.resolve()}")
         except Exception as exc:
             outcomes[name] = f"failed: {type(exc).__name__}: {exc}"
-            print(f"  [{name:18s}] FAILED  {type(exc).__name__}: {exc}")
+            print(f"  [{name:22s}] FAILED  {type(exc).__name__}: {exc}")
 
+    # --- 1-3. State time series -------------------------------------
     _save("position",         lambda: plots2d.plot_position(result))
+    _save("velocity",         lambda: plots2d.plot_velocity(result))
+    _save("angular_velocity", lambda: plots2d.plot_angular_velocity(result))
+
+    # --- 4. Acceleration (finite-difference from velocity samples) ---
+    def _accel_plot():
+        t = np.asarray(result.time)
+        v = np.asarray(result.linear_velocities)
+        a = np.gradient(v, t, axis=0)
+        fig, ax = plt.subplots(figsize=(6.0, 3.2))
+        for k, lbl in enumerate(("a_x", "a_y", "a_z")):
+            ax.plot(t, a[:, k], label=fr"${lbl}$")
+        ax.set_xlabel(r"time $t$ [s]")
+        ax.set_ylabel(r"acceleration [m s$^{-2}$]")
+        ax.legend(loc="best")
+        ax.set_title("Translational acceleration (finite-difference)")
+        return fig
+
+    _save("acceleration", _accel_plot)
+
+    # --- 5-6. Cable kinematics & forces ------------------------------
     _save("cable_tensions",   lambda: plots2d.plot_cable_tensions(result, robot=robot))
     _save("cable_lengths",    lambda: plots2d.plot_cable_lengths(result))
+
+    # --- 7. Cable stretch (length - mean of first 1% as proxy L_0) ---
+    def _stretch_plot():
+        L = np.asarray(result.cable_lengths)
+        head = max(1, int(0.01 * L.shape[0]))
+        L0 = L[:head].mean(axis=0)
+        d = L - L0[None, :]
+        fig, ax = plt.subplots(figsize=(6.0, 3.2))
+        for i in range(L.shape[1]):
+            ax.plot(result.time, d[:, i] * 1e3, label=f"cable {i+1}")
+        ax.set_xlabel(r"time $t$ [s]")
+        ax.set_ylabel(r"stretch $\Delta L$ [mm]")
+        ax.legend(loc="best", ncol=2, fontsize=8)
+        ax.set_title("Per-cable elongation vs initial length")
+        return fig
+
+    _save("cable_stretch", _stretch_plot)
+
+    # --- 8-9. Tracking & condition number ----------------------------
     if reference is not None:
         _save("tracking_error", lambda: plots2d.plot_tracking_error(result, reference))
+
+        def _rms_plot():
+            t = np.asarray(result.time)
+            ref = np.asarray([reference(tt).position for tt in t])
+            err = np.linalg.norm(np.asarray(result.positions) - ref, axis=1)
+            # cumulative RMS up to time t_k
+            sq_cumsum = np.cumsum(err ** 2)
+            denom = np.arange(1, len(err) + 1)
+            rms = np.sqrt(sq_cumsum / denom)
+            fig, ax = plt.subplots(figsize=(6.0, 3.2))
+            ax.plot(t, rms * 1e3, color="C3")
+            ax.set_xlabel(r"time $t$ [s]")
+            ax.set_ylabel("cumulative RMS error [mm]")
+            ax.set_title("Tracking error — cumulative RMS evolution")
+            return fig
+
+        _save("rms_error_evolution", _rms_plot)
+
     _save("condition_number", lambda: plots2d.plot_condition_number(result, robot))
+
+    # --- 10-12. Trajectory projections -------------------------------
+    if reference is not None:
+        ref_xyz = np.asarray([reference(t).position for t in result.time])
+    else:
+        ref_xyz = None
+    for plane in ("xy", "xz", "yz"):
+        _save(
+            f"trajectory_{plane}",
+            lambda p=plane: plots2d.plot_trajectory_projection(
+                result.positions, plane=p, reference=ref_xyz,
+            ),
+        )
+
+    # --- 13. 3D scene snapshot at the end of the run -----------------
     _save("scene_3d", lambda: render_scene(
         robot,
         Pose(
@@ -281,6 +365,7 @@ def render_plots(out_dir: Path, result, robot, reference) -> dict[str, str]:
         tensions=result.cable_tensions[-1],
         trajectory_positions=result.positions,
     ))
+
     return outcomes
 
 
