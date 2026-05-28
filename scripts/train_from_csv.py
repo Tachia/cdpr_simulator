@@ -71,6 +71,15 @@ _SRC = _REPO_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+# Make the shared CSV / robot helpers importable.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _csv_io import (                                                # noqa: E402
+    REQUIRED_CANONICAL,
+    load_csv_any,
+    robot_from_manifest_or_catalog,
+    split_canonical_blocks,
+)
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -85,8 +94,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     "timeseries.csv produced by scripts/run_simulation.py.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--input", type=Path, required=True,
-                   help="Path to a timeseries.csv (or any CSV with the same columns).")
+    p.add_argument("--input", type=str, required=True,
+                   help="Path to a timeseries.csv OR an http(s) URL to one. "
+                        "Local paths support arbitrary column layouts via "
+                        "alias auto-detection (see scripts/_csv_io.py for "
+                        "the alias table) and --column-map overrides.")
     p.add_argument("--model", choices=MODELS, default="pinn")
     p.add_argument("--out", type=Path, default=None,
                    help="Output directory (default: alongside the input as ./<model>/).")
@@ -105,48 +117,63 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--rl-steps", type=int, default=0,
                    help="For --model ppo/sac: SB3 .learn(total_timesteps=) before "
                         "evaluation. Zero means no learning, just eval the random init.")
+    # Phase-2 sweep additions (#4, #5, #6, #9, #10): URL inputs, column overrides,
+    # robot reconstruction overrides.
+    p.add_argument(
+        "--robot-config", type=str, default=None,
+        help="Path to a JSON robot description (see examples/robots/*.json). "
+             "Required for replay/RL when the CSV has no sibling manifest.json.",
+    )
+    p.add_argument(
+        "--column-map", type=str, default=None,
+        help='Optional override mapping of canonical-name=source-column pairs, '
+             'comma-separated. Example: "px=Position X,py=Position Y". '
+             'Applied AFTER alias auto-detection.',
+    )
     return p.parse_args(argv)
 
 
+def _parse_column_map(s: str | None) -> dict[str, str]:
+    if not s:
+        return {}
+    out: dict[str, str] = {}
+    for pair in s.split(","):
+        if "=" not in pair:
+            continue
+        k, v = pair.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
+
+
 # ---------------------------------------------------------------------------
-# CSV loader --- matches what scripts/run_simulation.py emits.
+# CSV loader --- delegates to scripts/_csv_io.load_csv_any so this script
+# can handle local paths, URLs, and arbitrary column layouts uniformly.
 # ---------------------------------------------------------------------------
 
-def load_csv(path: Path) -> dict[str, np.ndarray]:
-    """Read a timeseries.csv into a column-keyed dict of numpy arrays."""
-    with path.open("r", encoding="utf-8") as f:
-        header = f.readline().strip().split(",")
-    data = np.loadtxt(path, delimiter=",", skiprows=1)
-    if data.ndim == 1:                                              # single sample
-        data = data[None, :]
-    columns: dict[str, np.ndarray] = {h: data[:, i] for i, h in enumerate(header)}
-    return columns
+def load_csv_for_args(args):
+    """Resolve and parse the CSV referenced by ``args.input``.
 
-
-def split_columns(cols: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    """Pull out the canonical blocks (positions, quats, velocities, lengths, tensions)."""
-    def _stack(keys: list[str]) -> np.ndarray:
-        return np.column_stack([cols[k] for k in keys])
-    positions = _stack(["px", "py", "pz"])
-    quats = _stack(["qx", "qy", "qz", "qw"])
-    lin_vel = _stack(["vx", "vy", "vz"])
-    ang_vel = _stack(["wx", "wy", "wz"])
-    length_keys = sorted([k for k in cols if k.startswith("L")],
-                         key=lambda s: int(s[1:]))
-    tension_keys = sorted([k for k in cols if k.startswith("T")],
-                          key=lambda s: int(s[1:]))
-    lengths = _stack(length_keys) if length_keys else np.zeros((len(positions), 0))
-    tensions = _stack(tension_keys) if tension_keys else np.zeros((len(positions), 0))
-    time = cols["t"]
-    return {
-        "time": time,
-        "positions": positions,
-        "quaternions_xyzw": quats,
-        "linear_velocities": lin_vel,
-        "angular_velocities": ang_vel,
-        "cable_lengths": lengths,
-        "cable_tensions": tensions,
-    }
+    Returns ``(blocks, report, manifest_path)`` where ``manifest_path``
+    points at the sibling ``manifest.json`` when one exists locally
+    (URL-loaded inputs of course will not have one).
+    """
+    overrides = _parse_column_map(args.column_map)
+    columns, report = load_csv_any(args.input, overrides=overrides)
+    print(report.summary())
+    if report.missing_required:
+        print(
+            f"\nERROR: CSV is missing required columns {report.missing_required}.\n"
+            f"Pass --column-map 'px=…,py=…,pz=…' to map them explicitly.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    blocks = split_canonical_blocks(columns)
+    manifest_path = None
+    if not args.input.startswith(("http://", "https://")):
+        candidate = Path(args.input).expanduser().parent / "manifest.json"
+        if candidate.exists():
+            manifest_path = candidate
+    return blocks, report, manifest_path
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +349,7 @@ def run_supervised(args, blocks: dict[str, np.ndarray], out_dir: Path) -> dict:
     axes[0].set_title("Residual histogram")
     axes[0].set_xlabel("prediction error [N]")
     axes[1].boxplot([yhat[:, k] - y[:, k] for k in range(n_cables)],
-                    labels=[f"c{k+1}" for k in range(n_cables)])
+                    tick_labels=[f"c{k+1}" for k in range(n_cables)])
     axes[1].set_ylabel("error [N]")
     axes[1].set_title("Per-cable residual")
     fig.savefig(out_dir / "residuals.png", dpi=160, bbox_inches="tight")
@@ -351,26 +378,21 @@ def run_supervised(args, blocks: dict[str, np.ndarray], out_dir: Path) -> dict:
 # the analytic simulator, compares to the recorded tensions.
 # ---------------------------------------------------------------------------
 
-def run_replay(args, blocks: dict[str, np.ndarray], out_dir: Path) -> dict:
+def run_replay(args, blocks: dict[str, np.ndarray], out_dir: Path,
+               manifest_path: Path | None = None) -> dict:
     import matplotlib.pyplot as plt
     from scipy.spatial.transform import Rotation
     from cdpr.core.frames import Pose
     from cdpr.dynamics.rigid_body import PlatformState
     from cdpr.dynamics.simulator import simulate
-    from cdpr.interface.specs import (
-        SimulationRequest, TrajectorySpec, build_robot, build_trajectory,
-    )
+    from cdpr.interface.specs import SimulationRequest, TrajectorySpec, build_trajectory
 
-    manifest_path = args.input.parent / "manifest.json"
-    if not manifest_path.exists():
-        return {
-            "model": "replay",
-            "status": "manifest.json missing",
-            "note": f"Expected next to the CSV at {manifest_path}.",
-        }
+    if not manifest_path or not manifest_path.exists():
+        return _missing_manifest_stub("replay", out_dir,
+            "no sibling manifest.json --- pass --robot-config or run "
+            "scripts/run_simulation.py to generate one")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     req_d = manifest["request"]
-    # Rebuild the simulation request from the manifest.
     request = SimulationRequest(
         robot=req_d["robot"],
         payload_mass=req_d.get("payload_mass", 0.0),
@@ -384,7 +406,10 @@ def run_replay(args, blocks: dict[str, np.ndarray], out_dir: Path) -> dict:
             params=req_d["trajectory"].get("params", {}),
         ),
     )
-    robot = build_robot(request.robot, payload_mass=request.payload_mass)
+    # Robot reconstruction now goes through the manifest-aware helper so
+    # the dissertation_8cable (and any custom geometry persisted as
+    # robot_spec) works without code-side knowledge.
+    robot = robot_from_manifest_or_catalog(manifest, robot_config_path=args.robot_config)
     ref = build_trajectory(request.trajectory)
     p0 = ref(0.0).position
     state0 = PlatformState.at_rest(Pose(position=p0, rotation=Rotation.identity()))
@@ -458,7 +483,8 @@ def run_replay(args, blocks: dict[str, np.ndarray], out_dir: Path) -> dict:
 # matches the source manifest. Demonstrates the wiring; not a full train.
 # ---------------------------------------------------------------------------
 
-def run_rl(args, blocks: dict[str, np.ndarray], out_dir: Path) -> dict:
+def run_rl(args, blocks: dict[str, np.ndarray], out_dir: Path,
+           manifest_path: Path | None = None) -> dict:
     if find_spec("stable_baselines3") is None:
         return _missing_extra("stable_baselines3", "pip install 'cdpr[rl]'", out_dir)
     if find_spec("gymnasium") is None:
@@ -468,17 +494,13 @@ def run_rl(args, blocks: dict[str, np.ndarray], out_dir: Path) -> dict:
 
     from cdpr.learn.env import CDPREnv
 
-    manifest_path = args.input.parent / "manifest.json"
-    if not manifest_path.exists():
-        return {
-            "model": args.model,
-            "status": "manifest.json missing; need it to rebuild the env",
-        }
+    if not manifest_path or not manifest_path.exists():
+        return _missing_manifest_stub(args.model, out_dir,
+            "no sibling manifest.json --- pass --robot-config or supply a "
+            "CSV produced by scripts/run_simulation.py")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     req_d = manifest["request"]
-    from cdpr.interface.specs import (
-        SimulationRequest, TrajectorySpec, build_robot, build_trajectory,
-    )
+    from cdpr.interface.specs import SimulationRequest, TrajectorySpec, build_trajectory
     request = SimulationRequest(
         robot=req_d["robot"],
         payload_mass=req_d.get("payload_mass", 0.0),
@@ -492,16 +514,15 @@ def run_rl(args, blocks: dict[str, np.ndarray], out_dir: Path) -> dict:
             params=req_d["trajectory"].get("params", {}),
         ),
     )
-    robot = build_robot(request.robot, payload_mass=request.payload_mass)
+    robot = robot_from_manifest_or_catalog(manifest, robot_config_path=args.robot_config)
     reference = build_trajectory(request.trajectory)
 
-    env = CDPREnv(
-        robot=robot,
-        reference=reference,
-        duration=request.duration,
-        dt=request.dt,
-        gravity=request.gravity,
-    )
+    # CDPREnv expects a reference_factory(seed) -> callable, not a single
+    # reference --- wrap the manifest's trajectory in such a factory so SB3
+    # can deterministically reset across episodes.
+    def _ref_factory(_seed=None):
+        return reference
+    env = CDPREnv(robot=robot, reference_factory=_ref_factory)
     cls = PPO if args.model == "ppo" else SAC
     policy = cls("MlpPolicy", env, verbose=0, seed=args.seed)
     if args.rl_steps > 0:
@@ -557,7 +578,22 @@ def run_rl(args, blocks: dict[str, np.ndarray], out_dir: Path) -> dict:
 def _missing_extra(name: str, install_hint: str, out_dir: Path) -> dict:
     msg = f"{name} not installed --- skipped. Install with: {install_hint}"
     print(f"  [skip] {msg}")
-    (out_dir / "loss.png").parent.mkdir(parents=True, exist_ok=True)
+    _stub_plots(out_dir, msg)
+    return {"status": "skipped", "missing": name, "install_hint": install_hint}
+
+
+def _missing_manifest_stub(model: str, out_dir: Path, reason: str) -> dict:
+    """Used by replay / RL when no manifest.json is available to rebuild
+    the env. We still emit the three uniform placeholder figures so a
+    compare_models pass does not collapse on this row."""
+    msg = f"{model} skipped: {reason}"
+    print(f"  [skip] {msg}")
+    _stub_plots(out_dir, msg)
+    return {"model": model, "status": "skipped", "reason": reason}
+
+
+def _stub_plots(out_dir: Path, msg: str) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
     import matplotlib.pyplot as plt
     for stub in ("loss", "pred_vs_truth", "residuals"):
         fig, ax = plt.subplots(figsize=(6.0, 3.0))
@@ -565,7 +601,6 @@ def _missing_extra(name: str, install_hint: str, out_dir: Path) -> dict:
         ax.set_axis_off()
         fig.savefig(out_dir / f"{stub}.png", dpi=160, bbox_inches="tight")
         plt.close(fig)
-    return {"status": "skipped", "missing": name, "install_hint": install_hint}
 
 
 def git_describe() -> str:
@@ -583,7 +618,7 @@ def save_manifest(out_dir: Path, args, metrics: dict) -> None:
         "git_hash": git_describe(),
         "python": sys.version.split()[0],
         "platform": platform.platform(),
-        "input_csv": str(args.input.resolve()),
+        "input_csv": str(args.input),
         "model": args.model,
         "epochs": args.epochs,
         "batch_size": args.batch_size,
@@ -602,7 +637,11 @@ def default_out_dir(args: argparse.Namespace) -> Path:
     if args.out:
         return args.out
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    return args.input.parent / f"{args.model}-{stamp}"
+    # For URL inputs there is no sibling directory --- drop the artifacts
+    # under ./out/<model>-<timestamp>/ at the repo root instead.
+    if isinstance(args.input, str) and args.input.startswith(("http://", "https://")):
+        return _REPO_ROOT / "out" / f"{args.model}-{stamp}"
+    return Path(args.input).expanduser().parent / f"{args.model}-{stamp}"
 
 
 # ---------------------------------------------------------------------------
@@ -611,26 +650,21 @@ def default_out_dir(args: argparse.Namespace) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if not args.input.exists():
-        print(f"ERROR: input CSV not found: {args.input}", file=sys.stderr)
-        return 2
-
     out_dir = default_out_dir(args)
     out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"input   = {args.input.resolve()}")
+    print(f"input   = {args.input}")
     print(f"out_dir = {out_dir.resolve()}")
     print(f"model   = {args.model}")
 
-    cols = load_csv(args.input)
-    blocks = split_columns(cols)
+    blocks, _report, manifest_path = load_csv_for_args(args)
     print(f"samples = {len(blocks['time'])}, cables = {blocks['cable_tensions'].shape[1]}")
 
     if args.model in {"pinn", "mlp"}:
         metrics = run_supervised(args, blocks, out_dir)
     elif args.model == "replay":
-        metrics = run_replay(args, blocks, out_dir)
+        metrics = run_replay(args, blocks, out_dir, manifest_path=manifest_path)
     elif args.model in {"ppo", "sac"}:
-        metrics = run_rl(args, blocks, out_dir)
+        metrics = run_rl(args, blocks, out_dir, manifest_path=manifest_path)
     else:                                                          # pragma: no cover
         raise SystemExit(f"unknown model: {args.model}")
 

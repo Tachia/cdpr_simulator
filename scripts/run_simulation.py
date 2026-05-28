@@ -70,6 +70,11 @@ from cdpr.interface.specs import (                                 # noqa: E402
     build_trajectory,
 )
 
+# Shared CSV / robot helpers used by both run_simulation.py and the
+# Phase-2 train_from_csv.py + compare_models.py scripts.
+sys.path.insert(0, str(Path(__file__).resolve().parent))            # noqa: E402
+from _csv_io import RobotSpec, robot_from_spec                       # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -134,6 +139,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--t-max", type=float, default=None,
         help="Override max cable tension [N] (replaces the robot's catalog default).",
     )
+    # Generic parametric-robot knobs (improvements #6 and #13 in the post-mortem).
+    p.add_argument(
+        "--robot-config", type=Path, default=None,
+        help=(
+            "Path to a JSON robot description (see examples/robots/*.json). "
+            "When set, --robot is ignored and the geometry, mass, inertia and "
+            "tension bounds come from the file. CLI overrides like --t-min, "
+            "--t-max and --mass still apply on top."
+        ),
+    )
+    p.add_argument(
+        "--mass", type=float, default=None,
+        help="Override the platform mass [kg] for any robot.",
+    )
+    p.add_argument(
+        "--cable-diameter", type=float, default=None,
+        help="Override cable diameter [m] (only affects elastic / sagging models).",
+    )
     p.add_argument(
         "--gravity", type=float, nargs=3, metavar=("GX", "GY", "GZ"),
         default=[0.0, 0.0, -9.81],
@@ -177,48 +200,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 def _build_directive_robot(*, payload_mass: float, t_min: float, t_max: float):
-    """Construct the directive's 8-cable spatial CDPR verbatim.
+    """Backwards-compat thin wrapper around the canonical factory.
 
-    Anchors A1..A8 are placed exactly per the directive; the platform is
-    a 0.3 m cube with attachments at (±0.15, ±0.15, ±0.15); per-cable
-    tension limits default to the directive's 5-500 N specification.
+    The directive's 8-cable geometry now lives in
+    :mod:`cdpr.robots.dissertation` and is registered in the canonical
+    ``build_robot()`` factory; the Phase-2 scripts therefore reach the
+    same robot definition through the public API.
     """
-    from cdpr.geometry.robot import (
-        CableLimits, CableProperties, PlatformInertia, Robot, RobotGeometry,
-    )
-
-    anchors = np.array([
-        [-0.535, -0.755, +1.309],
-        [+0.755, -0.525, +1.309],
-        [-0.755, -0.525,  0.000],
-        [+0.535, -0.755,  0.000],
-        [-0.755, +0.525, +1.309],
-        [+0.535, +0.755,  +1.309],
-        [-0.535, +0.755,  0.000],
-        [+0.755, +0.525,  0.000],
-    ], dtype=np.float64)
-    s = 0.15                                                        # half-side of cubic EE
-    attachments = np.array([
-        [+s, +s, -s], [-s, +s, -s], [-s, -s, -s], [+s, -s, -s],
-        [+s, +s, +s], [-s, +s, +s], [-s, -s, +s], [+s, -s, +s],
-    ], dtype=np.float64)
-    geometry = RobotGeometry(
-        anchors=anchors, attachments=attachments, dof=6,
-        name="dissertation-8cable",
-    )
-
-    # Cubic platform mass = 1 kg (per directive) + optional payload.
-    mass = 1.0 + payload_mass
-    # Solid cube inertia: I = (1/6) m s^2.
-    I = (1.0 / 6.0) * mass * (2 * s) ** 2
-    inertia = PlatformInertia(
-        mass=mass, com=np.zeros(3), inertia=np.diag([I, I, I]),
-    )
-    return Robot(
-        geometry=geometry,
-        inertia=inertia,
-        limits=CableLimits.uniform(8, t_min=t_min, t_max=t_max),
-        cable_properties=CableProperties.steel_aircraft_cable(8, diameter_m=3e-3),
+    from cdpr.robots.dissertation import dissertation_8cable
+    return dissertation_8cable(
+        payload_mass=payload_mass,
+        t_min=t_min,
+        t_max=t_max,
     )
 
 
@@ -396,6 +389,7 @@ def save_manifest(
     samples: int, runtime_s: float,
     feasibility: dict | None = None,
     controller: str | None = None,
+    robot_spec: dict | None = None,
 ) -> None:
     manifest = {
         "git_hash": git_describe(),
@@ -404,6 +398,7 @@ def save_manifest(
         "request": _request_to_dict(request),
         "controller": controller,
         "feasibility": feasibility,
+        "robot_spec": robot_spec,
         "samples": samples,
         "runtime_s": round(runtime_s, 3),
     }
@@ -629,18 +624,36 @@ def main(argv: list[str] | None = None) -> int:
 
     request = build_request(args)
 
-    # Build the robot. The directive's exact geometry has its own factory
-    # so it stays version-controlled in this script. Everything else
-    # comes from the cdpr.robots catalog through the canonical builder.
-    if request.robot == "dissertation_8cable":
-        robot = _build_directive_robot(
-            payload_mass=float(args.payload_mass),
-            t_min=float(args.t_min if args.t_min is not None else 5.0),
-            t_max=float(args.t_max if args.t_max is not None else 500.0),
-        )
+    # Build the robot. Resolution order:
+    #   1. ``--robot-config <json>`` — fully custom (#6, #13).
+    #   2. Otherwise the canonical ``build_robot`` factory, which now
+    #      knows ``dissertation_8cable`` along with the catalog robots
+    #      (#1). Tension overrides go through the same factory.
+    if args.robot_config is not None:
+        with Path(args.robot_config).open("r", encoding="utf-8") as f:
+            spec_data = json.load(f)
+        spec = RobotSpec(**spec_data)
+        # Per-call overrides win.
+        if args.t_min is not None: spec.t_min = float(args.t_min)
+        if args.t_max is not None: spec.t_max = float(args.t_max)
+        if args.mass is not None:  spec.mass = float(args.mass)
+        if args.cable_diameter is not None: spec.cable_diameter_m = float(args.cable_diameter)
+        robot = robot_from_spec(spec)
     else:
-        robot = build_robot(request.robot, payload_mass=request.payload_mass)
-        _override_robot_limits(robot, t_min=args.t_min, t_max=args.t_max)
+        robot = build_robot(
+            request.robot,
+            payload_mass=request.payload_mass,
+            t_min=args.t_min,
+            t_max=args.t_max,
+        )
+        if args.mass is not None and robot.inertia is not None:
+            from cdpr.geometry.robot import PlatformInertia
+            scale = float(args.mass) / float(robot.inertia.mass)
+            robot.inertia = PlatformInertia(
+                mass=float(args.mass),
+                com=robot.inertia.com,
+                inertia=robot.inertia.inertia * scale,                # I scales with mass
+            )
 
     print(
         f"robot     : {robot.name}  n_cables={robot.n_cables}  dof={robot.dof}  "
@@ -736,7 +749,8 @@ def main(argv: list[str] | None = None) -> int:
         render_plots(out_dir, result, robot, reference)
 
     save_manifest(out_dir, request, samples=samples, runtime_s=runtime_s,
-                  feasibility=feas, controller=args.controller)
+                  feasibility=feas, controller=args.controller,
+                  robot_spec=RobotSpec.from_robot(robot).to_dict())
     print(f"  [feasibility.json ] -> {(out_dir / 'feasibility.json').resolve()}")
     print(f"  [manifest.json    ] -> {(out_dir / 'manifest.json').resolve()}")
 

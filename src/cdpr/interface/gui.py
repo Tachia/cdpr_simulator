@@ -77,7 +77,7 @@ from cdpr.interface.specs import (                               # noqa: E402
 # Build-id banner: lets the user tell instantly whether Streamlit Cloud
 # is serving the latest commit or a stale cached worker. Bump when the
 # behavioural contract of this file changes.
-BUILD_ID = "gui-2026-05-28-e"
+BUILD_ID = "gui-2026-05-28-f"
 
 # Frugal mode trims the *simulator* workload to keep the integration
 # cheap on the free tier (1 GB / 1 vCPU). Plot rendering is already
@@ -572,7 +572,8 @@ def _upload_panel() -> None:
 
 
 def _run_quick_pinn(df: "pd.DataFrame") -> None:
-    """Inline PINN fit: <1 s of CPU, fits within free-tier memory."""
+    """Inline PINN fit using the same alias mapping as the CLI: <1 s of
+    CPU, fits within free-tier memory, accepts arbitrary column names."""
     try:
         import importlib.util
         if importlib.util.find_spec("torch") is None:
@@ -584,30 +585,54 @@ def _run_quick_pinn(df: "pd.DataFrame") -> None:
         import matplotlib.pyplot as plt
         import torch
 
-        # Build (X, y) from the standard CSV layout.
-        need = {"t", "px", "py", "pz", "qx", "qy", "qz", "qw",
-                "vx", "vy", "vz", "wx", "wy", "wz"}
-        if not need.issubset(df.columns):
+        # Import the shared loader the CLI uses --- gives us alias
+        # mapping (Position X -> px, velocity_x -> vx, cable_N -> T_N,
+        # etc.) and the robust L/T numeric-suffix filter.
+        from pathlib import Path
+        import sys
+        _scripts = Path(__file__).resolve().parents[3] / "scripts"
+        if str(_scripts) not in sys.path:
+            sys.path.insert(0, str(_scripts))
+        from _csv_io import load_csv_any, split_canonical_blocks       # noqa: E402
+
+        # Write the uploaded dataframe to a temp file so the shared
+        # loader (which expects a path) can ingest it.
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".csv", delete=False, encoding="utf-8", newline="",
+        ) as tmp:
+            df.to_csv(tmp, index=False)
+            tmp_path = tmp.name
+        try:
+            columns, report = load_csv_any(tmp_path)
+        finally:
+            try: os.unlink(tmp_path)
+            except OSError: pass
+
+        if report.missing_required:
             st.warning(
-                "This CSV does not have the standard run_simulation.py layout "
-                f"(missing {sorted(need - set(df.columns))}). PINN fit skipped."
+                "CSV is missing required canonical columns "
+                f"{report.missing_required}. Use the CLI with "
+                "`--column-map` to map non-standard column names."
             )
             return
-        t = df["t"].to_numpy(dtype=np.float64)
-        pos = df[["px", "py", "pz"]].to_numpy(dtype=np.float64)
-        quat = df[["qx", "qy", "qz", "qw"]].to_numpy(dtype=np.float64)
-        lin_v = df[["vx", "vy", "vz"]].to_numpy(dtype=np.float64)
-        ang_v = df[["wx", "wy", "wz"]].to_numpy(dtype=np.float64)
+
+        blocks = split_canonical_blocks(columns)
+        t = blocks["time"].astype(np.float64)
+        pos = blocks["positions"].astype(np.float64)
+        quat = blocks["quaternions_xyzw"].astype(np.float64)
+        lin_v = blocks["linear_velocities"].astype(np.float64)
+        ang_v = blocks["angular_velocities"].astype(np.float64)
         lin_a = np.gradient(lin_v, t, axis=0)
         ang_a = np.gradient(ang_v, t, axis=0)
         X = np.concatenate([pos, quat, lin_v, ang_v, lin_a, ang_a], axis=1).astype(np.float32)
-
-        tension_cols = sorted([c for c in df.columns if c.startswith("T")
-                              and c[1:].isdigit()], key=lambda s: int(s[1:]))
-        if not tension_cols:
-            st.warning("No tension columns (T1, T2, …) found in CSV.")
+        y = blocks["cable_tensions"].astype(np.float32)
+        if y.shape[1] == 0:
+            st.warning(
+                "No cable-tension columns recognised (T1, tension_N, cable_N, …). "
+                "PINN fit skipped."
+            )
             return
-        y = df[tension_cols].to_numpy(dtype=np.float32)
 
         n_train = max(2, int(0.8 * len(X)))
         Xtr, ytr = X[:n_train], y[:n_train]

@@ -13,10 +13,12 @@ from cdpr.robots.catalog import (
     planar_translational,
     point_mass_3d,
 )
+from cdpr.robots.dissertation import dissertation_8cable
 
 __all__ = [
     "point_mass_3d",
     "planar_translational",
     "ipanema_class",
     "cogiro_class",
+    "dissertation_8cable",
 ]

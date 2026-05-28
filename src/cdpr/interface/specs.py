@@ -19,7 +19,10 @@ from typing import Literal
 import numpy as np
 
 
-RobotName = Literal["point_mass_3d", "planar_translational", "ipanema_class", "cogiro_class"]
+RobotName = Literal[
+    "point_mass_3d", "planar_translational",
+    "ipanema_class", "cogiro_class", "dissertation_8cable",
+]
 TrajectoryKind = Literal["hold", "line", "circle", "lissajous"]
 PlotKind = Literal[
     "position", "velocity", "angular_velocity",
@@ -77,16 +80,34 @@ class WorkspaceRequest:
 # Builders that turn specs into Phase-1 objects
 # ---------------------------------------------------------------------------
 
-def build_robot(name: RobotName, *, payload_mass: float = 0.0):
-    """Instantiate one of the reference robots; optionally add payload mass."""
+def build_robot(
+    name: RobotName,
+    *,
+    payload_mass: float = 0.0,
+    t_min: float | None = None,
+    t_max: float | None = None,
+):
+    """Instantiate one of the reference robots; optionally add payload mass
+    and override the per-cable tension bounds.
+
+    The ``t_min`` / ``t_max`` arguments are intentionally optional --- when
+    ``None`` the catalog default is kept (so existing test code keeps
+    working). When set, the robot's :class:`CableLimits` are replaced with
+    a uniform pair before return.
+    """
     from cdpr.robots import (
-        cogiro_class, ipanema_class, planar_translational, point_mass_3d,
+        cogiro_class, dissertation_8cable, ipanema_class,
+        planar_translational, point_mass_3d,
     )
+    # Each entry is a zero-arg factory --- ``dissertation_8cable`` accepts
+    # parameters but the (t_min, t_max) override below covers them so the
+    # base call here stays uniform.
     factories = {
         "point_mass_3d": point_mass_3d,
         "planar_translational": planar_translational,
         "ipanema_class": ipanema_class,
         "cogiro_class": cogiro_class,
+        "dissertation_8cable": dissertation_8cable,
     }
     if name not in factories:
         raise ValueError(f"Unknown robot name: {name!r}. Choose from {list(factories)}.")
@@ -98,6 +119,14 @@ def build_robot(name: RobotName, *, payload_mass: float = 0.0):
             com=robot.inertia.com,
             inertia=robot.inertia.inertia,
         )
+    if t_min is not None or t_max is not None:
+        from cdpr.geometry.robot import CableLimits
+        cur = robot.limits
+        cur_min = float(cur.t_min[0]) if cur is not None else 0.0
+        cur_max = float(cur.t_max[0]) if cur is not None else 1.0
+        new_min = float(t_min) if t_min is not None else cur_min
+        new_max = float(t_max) if t_max is not None else cur_max
+        robot.limits = CableLimits.uniform(robot.n_cables, t_min=new_min, t_max=new_max)
     return robot
 
 
