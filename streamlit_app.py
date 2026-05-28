@@ -4,8 +4,14 @@ Community Cloud expects a single ``streamlit_app.py`` at the repo root.
 We delegate immediately into the framework's console at
 :mod:`cdpr.interface.gui` so the actual UI code stays where it belongs.
 
-This file is also what ``streamlit run streamlit_app.py`` runs locally
-when developing the UI without the backend service.
+This file is also what ``streamlit run streamlit_app.py`` runs locally.
+
+Critical: matplotlib's backend MUST be selected before any plotting
+import. Streamlit Cloud workers run headless --- the default Tk / Qt
+backends will either fail to import or hang on the first figure draw,
+which produces a blank page with no Python-level traceback. The
+``Agg`` setting is forced here at the very top of the entry-point so
+every later import sees it.
 """
 
 from __future__ import annotations
@@ -14,15 +20,27 @@ import os
 import sys
 from pathlib import Path
 
-# Make the src/ layout importable when running from the repo root
-# (Community Cloud doesn't install the package in development mode).
+# 1) Headless matplotlib backend, set before any matplotlib import.
+os.environ["MPLBACKEND"] = "Agg"
+
+# 2) Lift the src/ layout onto sys.path. Streamlit Cloud installs the
+#    package from requirements.txt, but during local dev `streamlit run`
+#    from the repo root has no install --- fallback for both cases.
 _ROOT = Path(__file__).resolve().parent
 _SRC = _ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-# Default backend URL --- override with CDPR_BACKEND_URL in the env.
+# 3) Hint to the GUI that we want frugal defaults on a free-tier
+#    container (smaller default simulation + a single figure rendered
+#    only on the active tab). Set via env so the GUI module stays
+#    deployment-agnostic.
+os.environ.setdefault("CDPR_GUI_FRUGAL", "1")
+
+# 4) Default backend URL for the future variant of the GUI that talks
+#    to the FastAPI service over HTTP. The current GUI embeds cdpr in
+#    its own process and ignores this.
 os.environ.setdefault("CDPR_BACKEND_URL", "http://localhost:8000")
 
-# Importing the gui module triggers Streamlit page rendering.
+# 5) Importing the gui module triggers Streamlit page rendering.
 from cdpr.interface import gui  # noqa: F401, E402

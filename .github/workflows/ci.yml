@@ -34,20 +34,24 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           # --prefer-binary keeps pip from compiling scipy / matplotlib
           # from source on the Ubuntu runner (which can OOM on the free
-          # GH Actions worker). Same fix as for the Render Docker build.
-          # Torch / SB3 / MuJoCo extras are skipped in CI --- they're
-          # exercised by the smoke scripts on the developer machine.
+          # GH Actions worker). Torch / SB3 / MuJoCo extras are skipped
+          # here --- the smoke scripts on the dev machine exercise them.
           python -m pip install --prefer-binary -e ".[dev,viz,data,api]"
+
+      - name: Diagnostics — installed packages + cdpr import path
+        run: |
+          python -m pip list
+          python -c "import cdpr, cdpr.dynamics.simulator, cdpr.cables, cdpr.interface.api; print('cdpr at', cdpr.__file__)"
 
       - name: Lint (ruff)
         run: ruff check src tests
         continue-on-error: true   # not a gate; Phase-8 cleanup pending
 
-      - name: Run pytest
+      - name: Run pytest (verbose so failures appear in the log)
         env:
           MPLBACKEND: Agg
         run: |
-          python -m pytest tests/ -q \
+          python -m pytest tests/ -v --tb=short --maxfail=10 \
             --ignore=tests/test_learn_env.py \
             --ignore=tests/test_learn_supervised.py \
             --ignore=tests/test_learn_benchmark.py \
