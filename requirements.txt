@@ -6,6 +6,10 @@
 #     pip install -e ".[dev,viz,data,api,gui]"
 #
 # What's in here = what the deployed Streamlit research console needs.
+#
+# Cache-bust marker: bump this when forcing Streamlit Cloud to discard a
+# cached worker venv after a behavioural change in cdpr.interface.gui.
+# rebuild: 2026-05-28-c
 
 streamlit>=1.32
 

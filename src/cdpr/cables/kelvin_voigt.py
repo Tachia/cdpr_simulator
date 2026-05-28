@@ -132,7 +132,19 @@ class KelvinVoigtModel(CableModel):
         state: "PlatformState",
         rest_lengths: NDArray[np.float64],
     ) -> dict[str, Any]:
-        base = super().diagnostics(robot, state, rest_lengths)
+        # NOTE: do not use ``super().diagnostics(...)`` here. The class
+        # carries ``@dataclass(slots=True)``, and Python's dataclass
+        # mechanism replaces the original class object with a freshly
+        # constructed slotted one. The ``__class__`` cell that zero-arg
+        # ``super()`` captures at compile time still refers to the
+        # *pre-replacement* class, but ``self`` is an instance of the
+        # *post-replacement* class --- so the runtime check
+        # ``isinstance(self, __class__)`` fails and raises
+        # ``TypeError: super(type, obj): obj must be an instance or
+        # subtype of type``. Calling the parent method by name sidesteps
+        # the issue entirely and is correct here because ``CableModel``
+        # is the single base class (no diamond inheritance).
+        base = CableModel.diagnostics(self, robot, state, rest_lengths)
         dL_dt = self._length_rates(robot, state)
         base.update({
             "max_abs_Ldot": float(np.max(np.abs(dL_dt))),

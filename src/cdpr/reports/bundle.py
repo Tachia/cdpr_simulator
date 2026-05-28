@@ -210,10 +210,14 @@ def _write_latex(runs: list["BenchmarkRun"], path: Path, caption: str, label: st
     ]
     for r in runs:
         m = r.metrics
-        # Escape underscores for LaTeX.
+        # Escape underscores for LaTeX. Hoist the replace() calls into
+        # locals --- f-string expressions cannot contain a backslash on
+        # Python <3.12 (PEP 701 lifted the restriction only in 3.12).
+        scenario_str = r.scenario_name.replace("_", r"\_")
+        backend_str = r.backend.replace("_", r"\_")
         mode_str = m.cable_mode.replace("_", r"\_")
         lines.append(
-            fr"    {r.scenario_name.replace('_', r'\_')} & {r.backend} & {mode_str} & "
+            fr"    {scenario_str} & {backend_str} & {mode_str} & "
             fr"{m.tracking_error_rms:.3g} & {m.tracking_error_peak:.3g} & "
             fr"{m.orientation_error_rms_deg:.3g} & {m.feasibility_rate:.3g} & "
             fr"{m.condition_number_max:.3g} & {m.runtime_s:.3g} \\"
