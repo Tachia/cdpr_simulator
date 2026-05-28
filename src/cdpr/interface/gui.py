@@ -58,6 +58,7 @@ import matplotlib                                                # noqa: E402
 matplotlib.use("Agg", force=True)
 
 import io                                                        # noqa: E402
+import json                                                      # noqa: E402
 
 import numpy as np                                               # noqa: E402
 import pandas as pd                                              # noqa: E402
@@ -190,6 +191,7 @@ def render() -> None:
                     del st.session_state[k]
             st.rerun()
 
+        _examples_panel()
         request = _request_sidebar()
         _action_bar(request)
         _results_panel()
@@ -509,6 +511,107 @@ def _plot_scene_3d(result, robot):
 # ---------------------------------------------------------------------------
 # CSV / XLSX peek
 # ---------------------------------------------------------------------------
+
+def _examples_panel() -> None:
+    """Selectable built-in demonstrations (the directive's "tutorials").
+
+    Five examples are registered in :mod:`scripts.examples`; this panel
+    shows them in a dropdown with the per-example description, a copy-
+    paste-ready PowerShell command, and (for local Streamlit) a one-
+    click runner that shells out to ``scripts/run_example.py`` and
+    displays the resulting figures inline.
+
+    On Streamlit Cloud the one-click runner is hidden because each
+    Phase-1 example takes 30-300 s and several MB of plotting --- the
+    free-tier worker would OOM. The PowerShell command is always shown
+    so the user can drive it from a local terminal.
+    """
+    st.divider()
+    st.subheader("Built-in examples")
+
+    # Lazy import the registry --- keeps the GUI module's import cost
+    # light, and the script's path resolution works even on Streamlit
+    # Cloud where ``scripts/`` is not on sys.path by default.
+    try:
+        import sys as _sys
+        from pathlib import Path as _Path
+        scripts_dir = _Path(__file__).resolve().parents[3] / "scripts"
+        if str(scripts_dir) not in _sys.path:
+            _sys.path.insert(0, str(scripts_dir))
+        from examples import list_examples                            # noqa: E402
+        catalog = list_examples()
+    except Exception as exc:
+        st.warning(f"Examples registry unavailable: {exc}")
+        return
+
+    label_for: dict[str, dict] = {f"[{e['name']}] {e['title']}": e for e in catalog}
+    label = st.selectbox(
+        "Select a built-in example",
+        list(label_for.keys()),
+        key="example_select",
+        help="Five demonstrations cover the directive's two phases.",
+    )
+    entry = label_for[label]
+    cols = st.columns([5, 1])
+    cols[0].markdown(f"**Description:** {entry['description']}")
+    cols[1].markdown(f"**Phase:** {entry['phase']}")
+    if entry.get("depends_on"):
+        st.caption(f"Depends on example `{entry['depends_on']}` "
+                   "(auto-run if its CSV is missing).")
+
+    ps_cmd = f"python scripts\\run_example.py --name {entry['name']} --open"
+    st.code(ps_cmd, language="powershell")
+    st.caption(
+        "Copy the line above into a PowerShell terminal at the project "
+        "root. Output lands under `out/" + entry['out_dir'] + "/`."
+    )
+
+    # One-click in-app runner --- only enabled when we are NOT running
+    # on Streamlit Cloud (frugal-mode env var is the cloud signal).
+    if not FRUGAL:
+        if st.button(f"Run '{entry['name']}' inline (local only)",
+                     key=f"btn_example_{entry['name']}"):
+            _run_example_inline(entry)
+    else:
+        st.caption(
+            "Inline execution disabled on Streamlit Cloud (workers are too "
+            "small for the full plot bundle). Use the PowerShell command "
+            "above on a local checkout."
+        )
+
+
+def _run_example_inline(entry: dict) -> None:
+    import subprocess
+    import sys as _sys
+    from pathlib import Path as _Path
+    repo_root = _Path(__file__).resolve().parents[3]
+    cmd = [_sys.executable, str(repo_root / "scripts" / "run_example.py"),
+           "--name", entry["name"]]
+    with st.spinner(f"Running example '{entry['name']}' …"):
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(repo_root))
+    if proc.returncode != 0:
+        st.error(f"Example failed (exit {proc.returncode})")
+        st.code(proc.stderr or "", language="text")
+        return
+    st.success(f"Example '{entry['name']}' completed.")
+    out_root = repo_root / "out" / entry["out_dir"]
+    if not out_root.exists():
+        st.info(f"Output directory not found at {out_root}; check the console log.")
+        return
+    # Display all PNGs the run produced.
+    pngs = sorted(out_root.glob("*.png"))
+    if pngs:
+        st.write(f"Produced {len(pngs)} figure(s):")
+        for png in pngs[:18]:                                       # cap to keep page light
+            st.image(str(png), caption=png.name, use_container_width=True)
+    metrics = out_root / "feasibility.json"
+    if metrics.exists():
+        st.json(json.loads(metrics.read_text(encoding="utf-8")))
+    manifest = out_root / "manifest.json"
+    if manifest.exists():
+        with st.expander("manifest.json", expanded=False):
+            st.json(json.loads(manifest.read_text(encoding="utf-8")))
+
 
 def _upload_panel() -> None:
     """Phase-2 surface: peek at an uploaded log, then optionally run a

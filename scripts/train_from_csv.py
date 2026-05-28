@@ -393,6 +393,15 @@ def run_replay(args, blocks: dict[str, np.ndarray], out_dir: Path,
             "scripts/run_simulation.py to generate one")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     req_d = manifest["request"]
+    if req_d["trajectory"]["kind"] == "custom_callable":
+        return _missing_manifest_stub(
+            args.model, out_dir,
+            "the source manifest uses an inline Python callable as its "
+            "reference (kind='custom_callable'), which the analytic "
+            "replay / RL paths cannot reconstruct from the manifest "
+            "alone. Use a CSV produced by run_simulation.py (catalog "
+            "kinds) for these workflows.",
+        )
     request = SimulationRequest(
         robot=req_d["robot"],
         payload_mass=req_d.get("payload_mass", 0.0),
@@ -501,6 +510,15 @@ def run_rl(args, blocks: dict[str, np.ndarray], out_dir: Path,
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     req_d = manifest["request"]
     from cdpr.interface.specs import SimulationRequest, TrajectorySpec, build_trajectory
+    if req_d["trajectory"]["kind"] == "custom_callable":
+        return _missing_manifest_stub(
+            args.model, out_dir,
+            "the source manifest uses an inline Python callable as its "
+            "reference (kind='custom_callable'), which the analytic "
+            "replay / RL paths cannot reconstruct from the manifest "
+            "alone. Use a CSV produced by run_simulation.py (catalog "
+            "kinds) for these workflows.",
+        )
     request = SimulationRequest(
         robot=req_d["robot"],
         payload_mass=req_d.get("payload_mass", 0.0),
