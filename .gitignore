@@ -38,6 +38,7 @@ results/
 artifacts/
 runs/
 checkpoints/
+out/                                    # scripts/run_simulation.py output
 *.mp4
 *.gif
 *.h5

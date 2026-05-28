@@ -159,7 +159,10 @@ def plot_tracking_error(
     err = np.linalg.norm(result.positions - ref_positions, axis=1)
     ax.plot(result.time, err, color=CDPR_CABLE_COLORS[3])
     ax.set_xlabel(r"time $t$ [s]")
-    ax.set_ylabel(r"$\lVert \mathbf{p}(t) - \mathbf{p}_\mathrm{ref}(t) \rVert$ [m]")
+    # mathtext's reduced grammar does not understand \lVert / \rVert
+    # (those are amsmath, only available with usetex=True). Use the
+    # double-bar combination that mathtext parses everywhere.
+    ax.set_ylabel(r"$\|\mathbf{p}(t) - \mathbf{p}_\mathrm{ref}(t)\|$ [m]")
     ax.set_yscale("log")
     return fig
 
