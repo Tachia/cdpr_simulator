@@ -77,7 +77,7 @@ from cdpr.interface.specs import (                               # noqa: E402
 # Build-id banner: lets the user tell instantly whether Streamlit Cloud
 # is serving the latest commit or a stale cached worker. Bump when the
 # behavioural contract of this file changes.
-BUILD_ID = "gui-2026-05-28-c"
+BUILD_ID = "gui-2026-05-28-d"
 
 # Frugal mode trims the *simulator* workload to keep the integration
 # cheap on the free tier (1 GB / 1 vCPU). Plot rendering is already
@@ -126,25 +126,37 @@ def _seed_defaults() -> None:
     ``value=`` and ``key=`` simultaneously --- the source of the
     repeated 'value-and-state-may-differ' warnings that previously
     inflated the rerun WebSocket payload past Cloud's limit.
+
+    Keys here mirror :class:`SimulationRequest` / :class:`TrajectorySpec`
+    field semantics exactly. Robot identifiers use the canonical names
+    from :mod:`cdpr.interface.specs` (``point_mass_3d`` etc.) so
+    :func:`build_robot` accepts them without translation.
     """
     defaults: dict[str, object] = {
-        "robot": "point-mass",
+        # SimulationRequest
+        "robot": "ipanema_class",
         "payload_mass": 0.0,
-        "gravity": True,
-        "tension_min": 5.0,
-        "tension_max": 1500.0,
-        "kind": "circle",
+        "gravity_on": True,
+        "objective": "centered",
         "duration": 0.5 if FRUGAL else 1.5,
         "dt": 5e-3 if FRUGAL else 2e-3,
-        "line_start": "0,0,0",
-        "line_end": "0.3,0,0",
+        # TrajectorySpec
+        "kind": "circle",
+        # line params
+        "line_start": "0,0,0.5",
+        "line_end": "0.3,0,0.5",
+        # circle params --- build_trajectory expects center / radius /
+        # axis / angle_span (NOT period). Defaults trace one full revolution.
         "circle_center": "0,0,0.5",
         "circle_radius": 0.2,
-        "circle_period": 1.5,
-        "lissajous_amplitude": "0.2,0.2,0.0",
-        "lissajous_omega": "2,3,0",
-        "lissajous_phase": "0,1.5708,0",
-        "objective": "min_norm",
+        "circle_axis": "0,0,1",
+        "circle_angle_span": float(2 * np.pi),
+        # lissajous params --- build_trajectory expects amplitudes /
+        # frequencies / phases (plural).
+        "lissajous_center": "0,0,0.5",
+        "lissajous_amplitudes": "0.2,0.2,0.0",
+        "lissajous_frequencies": "1.0,2.0,0.0",
+        "lissajous_phases": "0,1.5708,0",
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -200,26 +212,38 @@ def render() -> None:
 # ---------------------------------------------------------------------------
 
 def _request_sidebar() -> SimulationRequest:
+    """Build a :class:`SimulationRequest` from the sidebar widget state.
+
+    Widget keys map 1:1 to :class:`SimulationRequest` /
+    :class:`TrajectorySpec` field semantics. Robot names use the
+    canonical identifiers from :mod:`cdpr.interface.specs` (``ipanema_class``
+    rather than ``ipanema``) so the result is consumable by the same
+    :func:`build_robot` helper the API uses.
+    """
     with st.sidebar:
         st.header("Experiment")
         st.selectbox(
-            "Robot", ["point-mass", "planar", "ipanema", "cogiro"], key="robot",
+            "Robot",
+            ["point_mass_3d", "planar_translational", "ipanema_class", "cogiro_class"],
+            key="robot",
+            help="Reference robot from cdpr.robots. Point-mass is the simplest "
+                 "(translation-only); IPAnema-class and CoGiRo-class are 6-DOF.",
         )
         st.number_input(
             "Payload mass [kg]", min_value=0.0, step=0.1, key="payload_mass",
+            help="Extra mass added to the platform's nominal inertia.",
         )
-        st.checkbox("Apply gravity", key="gravity")
-        st.number_input(
-            "Tension min [N]", min_value=0.0, step=1.0, key="tension_min",
+        st.checkbox(
+            "Apply gravity", key="gravity_on",
+            help="If off, the simulator runs with zero gravitational acceleration.",
         )
-        st.number_input(
-            "Tension max [N]", min_value=0.0, step=10.0, key="tension_max",
+        st.radio(
+            "Tension distribution objective",
+            ["min_norm", "centered", "preferred"],
+            horizontal=True, key="objective",
         )
 
-        st.header("Trajectory")
-        st.selectbox(
-            "Kind", ["hold", "line", "circle", "lissajous"], key="kind",
-        )
+        st.header("Time")
         st.number_input(
             "Duration [s]",
             min_value=0.05, max_value=5.0, step=0.05, key="duration",
@@ -228,6 +252,11 @@ def _request_sidebar() -> SimulationRequest:
             "Time step dt [s]",
             min_value=1e-4, max_value=5e-2, step=1e-3,
             format="%.4f", key="dt",
+        )
+
+        st.header("Trajectory")
+        st.selectbox(
+            "Kind", ["hold", "line", "circle", "lissajous"], key="kind",
         )
 
         st.subheader("Line")
@@ -239,53 +268,57 @@ def _request_sidebar() -> SimulationRequest:
         st.number_input(
             "radius [m]", min_value=0.0, step=0.05, key="circle_radius",
         )
+        st.text_input("axis (x,y,z)", key="circle_axis")
         st.number_input(
-            "period [s]", min_value=0.1, step=0.1, key="circle_period",
+            "angle span [rad]", min_value=0.1, step=0.1,
+            key="circle_angle_span",
         )
 
         st.subheader("Lissajous")
-        st.text_input("amplitude (x,y,z) [m]", key="lissajous_amplitude")
-        st.text_input("omega (x,y,z) [rad/s]", key="lissajous_omega")
-        st.text_input("phase (x,y,z) [rad]", key="lissajous_phase")
+        st.text_input("center (x,y,z) [m]", key="lissajous_center")
+        st.text_input("amplitudes (x,y,z) [m]", key="lissajous_amplitudes")
+        st.text_input("frequencies (x,y,z) [rad/s]", key="lissajous_frequencies")
+        st.text_input("phases (x,y,z) [rad]", key="lissajous_phases")
 
-        st.header("Tension distribution")
-        st.radio(
-            "Objective", ["min_norm", "centered", "preferred"],
-            horizontal=True, key="objective",
-        )
-
-    # Build params dict from current state.
+    # Build the kind-specific params dict. Keys here MUST match what
+    # cdpr.interface.specs.build_trajectory consumes:
+    #   line     -> start, end
+    #   circle   -> center, radius, axis, angle_span
+    #   lissajous-> center, amplitudes, frequencies, phases
     kind = st.session_state["kind"]
     if kind == "line":
         params: dict = {
-            "start": _parse_xyz(st.session_state["line_start"], default=[0.0, 0.0, 0.0]),
-            "end":   _parse_xyz(st.session_state["line_end"],   default=[0.3, 0.0, 0.0]),
+            "start": _parse_xyz(st.session_state["line_start"], default=[0.0, 0.0, 0.5]),
+            "end":   _parse_xyz(st.session_state["line_end"],   default=[0.3, 0.0, 0.5]),
         }
     elif kind == "circle":
         params = {
             "center": _parse_xyz(st.session_state["circle_center"], default=[0.0, 0.0, 0.5]),
             "radius": float(st.session_state["circle_radius"]),
-            "period": float(st.session_state["circle_period"]),
+            "axis":   _parse_xyz(st.session_state["circle_axis"],   default=[0.0, 0.0, 1.0]),
+            "angle_span": float(st.session_state["circle_angle_span"]),
         }
     elif kind == "lissajous":
         params = {
-            "amplitude": _parse_xyz(st.session_state["lissajous_amplitude"], default=[0.2, 0.2, 0.0]),
-            "omega":     _parse_xyz(st.session_state["lissajous_omega"],     default=[2.0, 3.0, 0.0]),
-            "phase":     _parse_xyz(st.session_state["lissajous_phase"],     default=[0.0, np.pi / 2, 0.0]),
+            "center":      _parse_xyz(st.session_state["lissajous_center"],      default=[0.0, 0.0, 0.5]),
+            "amplitudes":  _parse_xyz(st.session_state["lissajous_amplitudes"],  default=[0.2, 0.2, 0.0]),
+            "frequencies": _parse_xyz(st.session_state["lissajous_frequencies"], default=[1.0, 2.0, 0.0]),
+            "phases":      _parse_xyz(st.session_state["lissajous_phases"],      default=[0.0, np.pi / 2, 0.0]),
         }
     else:  # hold
         params = {}
 
+    duration = float(st.session_state["duration"])
+    gravity_vec = (0.0, 0.0, -9.81) if bool(st.session_state["gravity_on"]) else (0.0, 0.0, 0.0)
+
     return SimulationRequest(
         robot=st.session_state["robot"],
         payload_mass=float(st.session_state["payload_mass"]),
-        gravity=bool(st.session_state["gravity"]),
-        tension_min=float(st.session_state["tension_min"]),
-        tension_max=float(st.session_state["tension_max"]),
+        gravity=gravity_vec,
         tension_objective=st.session_state["objective"],
-        duration=float(st.session_state["duration"]),
+        duration=duration,
         dt=float(st.session_state["dt"]),
-        trajectory=TrajectorySpec(kind=kind, params=params),
+        trajectory=TrajectorySpec(kind=kind, duration=duration, params=params),
     )
 
 
@@ -314,14 +347,19 @@ def _action_bar(request: SimulationRequest) -> None:
             with st.spinner("Integrating…"):
                 robot = build_robot(request.robot, payload_mass=request.payload_mass)
                 ref = build_trajectory(request.trajectory)
+                # PlatformState.at_rest(pose) is the canonical factory.
+                # Pose has no from_translation() --- use the constructor
+                # with Rotation.identity() for a position-only start.
                 p0 = ref(0.0).position
-                state0 = PlatformState.from_pose(Pose.from_translation(p0))
+                state0 = PlatformState.at_rest(
+                    Pose(position=p0, rotation=Rotation.identity())
+                )
                 result = simulate(
                     robot=robot,
                     state0=state0,
-                    reference=ref,
                     duration=request.duration,
                     dt=request.dt,
+                    reference=ref,
                     tension_objective=request.tension_objective,
                     gravity=request.gravity,
                 )
