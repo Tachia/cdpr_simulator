@@ -1,0 +1,28 @@
+# Hugging Face Spaces requirements for the Gradio frontend.
+# Equivalent of:  pip install -e ".[viz,data,gui]" with Gradio on top.
+#
+# HF Spaces auto-detects this file at the root of the repo when the
+# Space SDK is set to "Gradio".
+
+# Gradio itself.
+gradio>=4.40
+
+# Scientific core (matches the [viz] / [data] / [learn] extras).
+numpy>=1.24
+scipy>=1.11
+sympy>=1.12
+matplotlib>=3.8
+pillow>=10.0
+pandas>=2.1
+openpyxl>=3.1
+
+# Phase-2 model paths. PyTorch's CPU wheel keeps install size manageable
+# (the GPU wheel triples the install; HF Spaces CPU-Basic has no GPU
+# anyway).
+torch>=2.2 ; python_version >= "3.10"
+gymnasium>=0.29
+stable-baselines3>=2.3
+
+# Install the cdpr package itself. Hatchling builds from pyproject.toml.
+# (No extras listed --- everything we need is above.)
+.

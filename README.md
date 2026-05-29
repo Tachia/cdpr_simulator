@@ -68,20 +68,34 @@ result = simulate(robot=robot, state0=state0, duration=1.5, dt=2e-3,
 
 ## Running the services
 
-The framework ships with two human-facing surfaces:
+The framework ships with multiple coexisting human-facing surfaces.
+Every one of them imports the same `cdpr` scientific core — see
+[docs/multi-frontend.md](docs/multi-frontend.md) for the topology.
 
-- **FastAPI backend** (`cdpr.interface.api`): JSON HTTP API for simulate / workspace / plot / robot catalogue.
-- **Streamlit console** (`cdpr.interface.gui`): structured research UI; talks to the backend.
+| Surface | Best for | Command |
+|---|---|---|
+| PowerShell / bash CLI | Reproducible runs, batch sweeps, headless work | `python scripts/run_example.py --name circle` |
+| **FastAPI backend** (`cdpr.interface.api`) | JSON HTTP for any client | `uvicorn cdpr.interface.api:app --port 8000` |
+| **Gradio GUI** (`gradio_app.py`) — **recommended hosted demo** | Free 16 GB Hugging Face Space, robust uploads | `python gradio_app.py` (local) |
+| **Streamlit console** (`streamlit_app.py`) | Local research UI | `streamlit run streamlit_app.py` |
 
 ```bash
-# Backend
-pip install -e ".[api,viz]"
-uvicorn cdpr.interface.api:app --host 0.0.0.0 --port 8000
+# All deps, then start any combination:
+pip install -e ".[api,viz,data,gui,gradio,learn,rl]"
 
-# Frontend (separate process)
-pip install -e ".[gui,viz]"
-streamlit run src/cdpr/interface/gui.py
+uvicorn cdpr.interface.api:app --port 8000      # API @ http://localhost:8000/docs
+python gradio_app.py                            # Gradio @ http://localhost:7860
+streamlit run streamlit_app.py                  # Streamlit @ http://localhost:8501
+python scripts/run_example.py --list            # CLI (5 built-in examples)
 ```
+
+For the universal terminal walk-through (PowerShell / CMD / Git Bash /
+bash / zsh / VSCode / SSH / Colab) see
+[docs/terminal-execution.md](docs/terminal-execution.md).
+
+For the architectural rationale on why Gradio is now the recommended
+hosted demo see
+[docs/frontend-architecture.md](docs/frontend-architecture.md).
 
 ## Deployment (Phase 8 wiring)
 

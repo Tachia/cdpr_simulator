@@ -59,6 +59,11 @@ api = [
 gui = [
   "streamlit>=1.32",
 ]
+gradio = [
+  # Alternative hosted-GUI stack; recommended for the public demo URL.
+  # See docs/frontend-architecture.md for the architectural rationale.
+  "gradio>=4.40",
+]
 storage = [
   "supabase>=2.4",
 ]

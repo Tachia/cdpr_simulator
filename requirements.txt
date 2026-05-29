@@ -9,7 +9,7 @@
 #
 # Cache-bust marker: bump this when forcing Streamlit Cloud to discard a
 # cached worker venv after a behavioural change in cdpr.interface.gui.
-# rebuild: 2026-05-28-h
+# rebuild: 2026-05-29-a
 
 streamlit>=1.32
 
