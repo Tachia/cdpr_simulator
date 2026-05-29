@@ -1,3 +1,14 @@
+---
+title: CDPR Simulator
+emoji: 🤖
+colorFrom: blue
+colorTo: green
+sdk: gradio
+sdk_version: 6.15.2
+app_file: app.py
+pinned: false
+---
+
 # cdpr — Cable-Driven Parallel Robot research framework
 
 A hybrid physics-driven and data-driven computational framework for **Cable-Driven Parallel Robots**, developed as the software contribution of an Innopolis PhD dissertation.
