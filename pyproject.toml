@@ -64,6 +64,13 @@ gradio = [
   # See docs/frontend-architecture.md for the architectural rationale.
   "gradio>=4.40",
 ]
+dash = [
+  # Recommended local research dashboard. Plotly figures, callback model,
+  # no script reruns --- structurally a better fit for this workload
+  # than Streamlit. See docs/frontend-architecture-revised.md.
+  "dash>=2.17",
+  "plotly>=5.22",
+]
 storage = [
   "supabase>=2.4",
 ]

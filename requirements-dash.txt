@@ -1,0 +1,27 @@
+# Hugging Face Spaces (Docker SDK) requirements for the Dash dashboard.
+# Equivalent of:  pip install -e ".[viz,data,api,dash,learn,rl]" but
+# pinned to a single requirements file the way HF / Render expect.
+#
+# Dash + Plotly + the cdpr scientific core, with the [learn]/[rl]
+# extras so the Phase-2 model paths work inside the same worker.
+
+# Dash + Plotly
+dash>=2.17
+plotly>=5.22
+
+# Scientific core (matches the [viz] / [data] extras).
+numpy>=1.24
+scipy>=1.11
+sympy>=1.12
+matplotlib>=3.8
+pillow>=10.0
+pandas>=2.1
+openpyxl>=3.1
+
+# Phase-2 models --- CPU wheels keep install size manageable on free hosts.
+torch>=2.2 ; python_version >= "3.10"
+gymnasium>=0.29
+stable-baselines3>=2.3
+
+# Install the cdpr package itself; hatchling builds from pyproject.toml.
+.
