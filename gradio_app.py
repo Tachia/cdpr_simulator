@@ -536,12 +536,23 @@ def build_ui() -> gr.Blocks:
     return demo
 
 
+# Module-level ``demo`` — required by Hugging Face Spaces, which does
+# ``from gradio_app import demo`` (or ``from app import demo`` via the
+# tiny app.py shim). Building it here at import time keeps the launch
+# path identical between ``python gradio_app.py`` (local) and HF's
+# auto-launch.
+demo = build_ui()
+
+
 if __name__ == "__main__":
-    demo = build_ui()
-    # ``share=False`` keeps the app private on HF Spaces (the Space URL
-    # is already public). ``server_name=0.0.0.0`` is required for HF.
+    # Local launch. ``server_name=0.0.0.0`` makes the server reachable
+    # from the LAN (HF Spaces requires it; on the dev machine 127.0.0.1
+    # is the same address served at http://127.0.0.1:7860).
     demo.launch(
         server_name=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
         server_port=int(os.environ.get("GRADIO_SERVER_PORT", "7860")),
         show_error=True,
+        # share=True would give a temporary tunnel URL --- uncomment
+        # if you need a public link without going through HF Spaces.
+        # share=True,
     )
