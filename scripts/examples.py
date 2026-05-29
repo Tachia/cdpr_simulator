@@ -184,15 +184,40 @@ def _render_phase1_plots(out_dir: Path, result, robot, reference):
 
     figs_made: list[str] = []
 
+    # Hard cap on matplotlib canvas dimensions. The directive's max is
+    # 10000 x 10000; we go below that to leave margin for tight_layout.
+    MAX_PIXELS = 8000
+
     def _save(name: str, fn) -> None:
         path = out_dir / f"{name}.png"
         try:
             fig = fn()
-            fig.savefig(path, dpi=160, bbox_inches="tight")
+            # Validate canvas size BEFORE savefig. Matplotlib crashes
+            # with cryptic 'image size too large' errors when figsize x
+            # dpi exceeds a few hundred million pixels --- which can
+            # happen when somebody passes log-scaled outliers or a 12 h
+            # sim through a per-step plot.
+            dpi = 160
+            w_in, h_in = fig.get_size_inches()
+            w_px, h_px = int(w_in * dpi), int(h_in * dpi)
+            if w_px > MAX_PIXELS or h_px > MAX_PIXELS:
+                # Downscale dpi proportionally rather than dropping the
+                # figure entirely.
+                scale = MAX_PIXELS / max(w_px, h_px)
+                dpi = max(50, int(dpi * scale))
+                print(f"  [{name:22s}] WARN: canvas {w_px}x{h_px} > {MAX_PIXELS}, "
+                      f"reducing dpi to {dpi}")
+            fig.savefig(path, dpi=dpi, bbox_inches="tight")
             plt.close(fig)
             figs_made.append(name)
             print(f"  [{name:22s}] -> {path.resolve()}")
         except Exception as exc:
+            # Defensive: even with the size guard, never let one plot
+            # bring down the others. The directive says: never crash.
+            try:
+                plt.close("all")
+            except Exception:                                       # pragma: no cover
+                pass
             print(f"  [{name:22s}] FAILED  {type(exc).__name__}: {exc}")
 
     _save("position",         lambda: plots2d.plot_position(result))

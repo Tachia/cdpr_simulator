@@ -34,6 +34,11 @@ from typing import Any
 
 import numpy as np
 
+try:
+    import pandas as pd                                              # noqa: F401
+except ImportError:                                                  # pragma: no cover
+    pd = None  # type: ignore[assignment]
+
 
 # ---------------------------------------------------------------------------
 # Canonical schema --- the columns the simulator writes, and the aliases
@@ -198,7 +203,34 @@ def _classify_cable_column(raw: str) -> tuple[str | None, int | None]:
 # ---------------------------------------------------------------------------
 
 def _parse_csv_rows(path: Path) -> tuple[list[str], np.ndarray]:
-    """Read header + rows, tolerating leading whitespace and BOM."""
+    """Read header + rows, tolerating BOM, missing-value sentinels,
+    timestamp strings (auto-converted), and arbitrary file formats.
+
+    Delegates to :func:`cdpr.ingest.smart_loader.load_dataset` so every
+    consumer of ``_csv_io`` (train_from_csv, compare_models, Gradio's
+    upload tab, Dash, Streamlit) automatically gets:
+
+    * timestamp auto-conversion (``2025-05-07 15:01:27`` → seconds),
+    * missing-value imputation through the 5-level hierarchy,
+    * .xlsx / .xls / .ods / .parquet / .feather support.
+
+    Falls back to the original csv-stdlib parser when the smart loader
+    is unavailable (pandas not installed). Pandas IS the data extra
+    everywhere except minimum core installs, so the fallback is rare.
+    """
+    try:
+        from cdpr.ingest.smart_loader import load_dataset
+        df, _report = load_dataset(path)
+        # Drop columns that cannot be cast to float (timestamps stay as
+        # strings; smart_loader already extracted seconds into 't').
+        numeric_df = df.apply(lambda s: pd.to_numeric(s, errors="coerce"))
+        numeric_df = numeric_df.dropna(axis="columns", how="all")
+        header = [str(c) for c in numeric_df.columns]
+        arr = numeric_df.to_numpy(dtype=np.float64, na_value=np.nan, copy=False)
+        return header, arr
+    except ImportError:
+        # pandas missing --- fall through to the bare csv-stdlib path.
+        pass
     with path.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.reader(f)
         try:
@@ -210,12 +242,23 @@ def _parse_csv_rows(path: Path) -> tuple[list[str], np.ndarray]:
         for row_no, row in enumerate(reader, start=2):
             if not row or all(not str(c).strip() for c in row):
                 continue
-            try:
-                data_rows.append([float(c) if str(c).strip() else float("nan") for c in row])
-            except ValueError as exc:
-                raise ValueError(
-                    f"could not parse CSV row {row_no} as floats: {row} ({exc})"
-                ) from exc
+            row_out: list[float] = []
+            for c in row:
+                s = str(c).strip().lower()
+                # Recognise missing-value sentinels even without pandas.
+                if s in {"", "none", "null", "n/a", "na", "nan",
+                          "missing", "blank", "-", "--"}:
+                    row_out.append(float("nan"))
+                else:
+                    try:
+                        row_out.append(float(c))
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"could not parse CSV row {row_no} cell {c!r} as float "
+                            "(install pandas via `pip install -e \".[data]\"` "
+                            "for timestamp + missing-value auto-handling)"
+                        ) from exc
+            data_rows.append(row_out)
         if not data_rows:
             raise ValueError(f"CSV has a header but no data rows: {path}")
     arr = np.asarray(data_rows, dtype=np.float64)
