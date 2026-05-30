@@ -39,6 +39,7 @@ from cdpr.llm.config import (
     LLMConfig,
     available_providers,
     default_provider_name,
+    resolve_fallback_chain,
 )
 from cdpr.llm.factory import build_provider
 
@@ -50,5 +51,6 @@ __all__ = [
     "LLMConfig",
     "available_providers",
     "default_provider_name",
+    "resolve_fallback_chain",
     "build_provider",
 ]

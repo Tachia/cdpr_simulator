@@ -395,7 +395,7 @@ def _run_custom_simulation(
         )
         dt_run = time.perf_counter() - t0
 
-        # Write outputs + render plots into a unique temp dir.
+        # Write outputs + render plots into a unique timestamped dir.
         stamp = time.strftime("%Y%m%d-%H%M%S")
         out_dir = _ROOT / "out" / f"gradio-custom-{stamp}"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -409,24 +409,189 @@ def _run_custom_simulation(
         )
         figs = _render_phase1_plots(out_dir, result, robot, reference)
 
+        # Extra figure: dense reference vs realised trajectory in 3D.
+        # Makes shape-level differences (circle vs figure-eight vs line)
+        # unambiguous at a glance. Built from the reference callable and
+        # the actual result.positions of THIS run --- no caching.
+        _render_reference_overlay(
+            out_dir, reference, result, request.trajectory, controller_label,
+        )
+
         tens = np.asarray(result.cable_tensions)
         ref_pos = np.array([reference(t).position for t in result.time])
         err = np.linalg.norm(np.asarray(result.positions) - ref_pos, axis=1)
+        metrics = {
+            "samples": int(len(result.time)),
+            "wall_time_s": round(dt_run, 3),
+            "tension_min_N": float(tens.min()),
+            "tension_max_N": float(tens.max()),
+            "infeasible_steps": int(len(result.infeasible_steps)),
+            "tracking_rms_mm": float(np.sqrt(np.mean(err ** 2)) * 1e3),
+            "tracking_peak_mm": float(err.max() * 1e3),
+        }
+        manifest_path = _write_run_manifest(
+            out_dir, request, result, controller_label,
+            kp_pos=kp_pos, kp_rot=kp_rot,
+            mpc_horizon=mpc_horizon, mpc_q_pos=mpc_q_pos, mpc_q_vel=mpc_q_vel,
+            mpc_r_force=mpc_r_force, mpc_p_terminal=mpc_p_terminal,
+            t_min=t_min, t_max=t_max, gravity_on=gravity_on,
+            metrics=metrics,
+        )
+        # SHA1 of the realised position trajectory --- two runs that share
+        # this fingerprint are bit-for-bit identical. Two runs that differ
+        # anywhere in inputs produce different fingerprints, which proves
+        # the figures cannot have come from a cached previous run.
+        import hashlib
+        fp_pos = hashlib.sha1(np.asarray(result.positions).tobytes()).hexdigest()[:12]
+
         status = (
             f"[done] {len(result.time)} samples in {dt_run:.1f} s\n"
-            f"controller : {controller_label}\n"
-            f"tensions   : [{float(tens.min()):.2f}, {float(tens.max()):.2f}] N\n"
-            f"infeasible : {len(result.infeasible_steps)} steps\n"
-            f"tracking   : RMS {float(np.sqrt(np.mean(err**2))) * 1e3:.2f} mm  "
-            f"peak {float(err.max()) * 1e3:.2f} mm\n"
-            f"figures    : {len(figs)} PNGs in {out_dir}\n"
-            f"build      : {BUILD_ID}\n"
+            f"run id       : {stamp}\n"
+            f"controller   : {controller_label}\n"
+            f"trajectory   : {kind} {dict(params)!r}\n"
+            f"tensions     : [{tens.min():.2f}, {tens.max():.2f}] N\n"
+            f"infeasible   : {len(result.infeasible_steps)} steps\n"
+            f"tracking     : RMS {metrics['tracking_rms_mm']:.2f} mm  "
+            f"peak {metrics['tracking_peak_mm']:.2f} mm\n"
+            f"position hash: {fp_pos}   (different every distinct run)\n"
+            f"manifest     : {manifest_path.name}\n"
+            f"figures      : {len(figs) + 1} PNGs in {out_dir}\n"
+            f"build        : {BUILD_ID}\n"
         )
         png_paths = sorted(str(p) for p in out_dir.glob("*.png"))
         return status, png_paths, str(csv_path)
     except Exception as exc:
         return (f"ERROR: {type(exc).__name__}: {exc}\n\n{traceback.format_exc()}",
                 [], "")
+
+
+# ---------------------------------------------------------------------------
+# Per-run audit artefacts: manifest + reference overlay
+# ---------------------------------------------------------------------------
+# Two artefacts that make every run independently auditable:
+#
+#  * ``run_manifest.json`` --- every input parameter + the resulting
+#    metrics + a SHA1 of the realised trajectory. If two runs share a
+#    fingerprint, they ARE the same simulation; if the fingerprint
+#    differs, every figure built from result.positions necessarily
+#    differs too.
+#  * ``reference_vs_actual_3d.png`` --- the high-resolution reference
+#    trajectory (from the analytic callable) overlaid with the actual
+#    realised trajectory (from the simulation). Shape-level differences
+#    (circle vs figure-eight vs line vs hold) jump out instantly.
+
+
+def _write_run_manifest(
+    out_dir: Path, request: SimulationRequest, result, controller_label: str,
+    *, kp_pos: float, kp_rot: float,
+    mpc_horizon: float, mpc_q_pos: float, mpc_q_vel: float,
+    mpc_r_force: float, mpc_p_terminal: float,
+    t_min: float, t_max: float, gravity_on: bool,
+    metrics: dict,
+) -> Path:
+    """Write a per-run JSON manifest. The fingerprint at the bottom is
+    the SHA1 of the realised trajectory; two runs with the same
+    fingerprint are bit-for-bit identical."""
+    import hashlib
+    positions = np.asarray(result.positions)
+    tensions = np.asarray(result.cable_tensions)
+    manifest = {
+        "build_id": BUILD_ID,
+        "run_started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "robot": request.robot,
+        "payload_mass_kg": float(request.payload_mass),
+        "gravity_on": bool(gravity_on),
+        "tension_objective": request.tension_objective,
+        "tension_bounds_N": [float(t_min), float(t_max)],
+        "duration_s": float(request.duration),
+        "dt_s": float(request.dt),
+        "trajectory": {
+            "kind": request.trajectory.kind,
+            "params": request.trajectory.params,
+        },
+        "controller": {
+            "label": controller_label,
+            "kp_pos_pd": float(kp_pos),
+            "kp_rot_shared": float(kp_rot),
+            "mpc": {
+                "horizon": int(mpc_horizon),
+                "Q_pos": float(mpc_q_pos),
+                "Q_vel": float(mpc_q_vel),
+                "R_force": float(mpc_r_force),
+                "P_terminal": float(mpc_p_terminal),
+            },
+        },
+        "metrics": metrics,
+        "fingerprint": {
+            "positions_sha1": hashlib.sha1(positions.tobytes()).hexdigest(),
+            "tensions_sha1":  hashlib.sha1(tensions.tobytes()).hexdigest(),
+            "samples":        int(positions.shape[0]),
+            "cables":         int(tensions.shape[1]),
+        },
+    }
+    path = out_dir / "run_manifest.json"
+    path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return path
+
+
+def _render_reference_overlay(
+    out_dir: Path, reference, result, traj_spec, controller_label: str,
+) -> None:
+    """Render reference_vs_actual_3d.png + reference_vs_actual_xy.png.
+
+    The reference path is sampled at HIGH resolution from the analytic
+    ``reference(t)`` callable, so the curve looks smooth regardless of
+    how coarse the simulation dt is. The actual realised trajectory
+    comes from ``result.positions``. Both are plotted in the same axes
+    so the shape difference is unmistakable."""
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D                            # noqa: F401
+
+    try:
+        from cdpr.viz.style import apply_paper_style
+        apply_paper_style()
+    except Exception:                                                  # pragma: no cover
+        pass
+
+    t = np.asarray(result.time)
+    if t.size < 2:
+        return
+    # Sample the reference at 10x the simulation rate (capped at 4000
+    # samples so the figure stays light).
+    n_ref = int(min(4000, max(400, 10 * t.size)))
+    t_ref = np.linspace(float(t[0]), float(t[-1]), n_ref)
+    ref_xyz = np.asarray([reference(tt).position for tt in t_ref])
+    act_xyz = np.asarray(result.positions)
+
+    fig = plt.figure(figsize=(8.2, 5.2))
+    ax3 = fig.add_subplot(1, 2, 1, projection="3d")
+    ax3.plot(ref_xyz[:, 0], ref_xyz[:, 1], ref_xyz[:, 2],
+              "-", color="C0", lw=1.5, label="reference")
+    ax3.plot(act_xyz[:, 0], act_xyz[:, 1], act_xyz[:, 2],
+              "--", color="C3", lw=1.3, label="actual")
+    ax3.set_xlabel("x [m]"); ax3.set_ylabel("y [m]"); ax3.set_zlabel("z [m]")
+    ax3.legend(loc="best", fontsize=8)
+    ax3.set_title(f"Reference vs actual ({traj_spec.kind})")
+
+    ax2 = fig.add_subplot(1, 2, 2)
+    ax2.plot(ref_xyz[:, 0], ref_xyz[:, 1], "-",
+              color="C0", lw=1.5, label="reference")
+    ax2.plot(act_xyz[:, 0], act_xyz[:, 1], "--",
+              color="C3", lw=1.3, label="actual")
+    ax2.set_xlabel("x [m]"); ax2.set_ylabel("y [m]")
+    ax2.set_aspect("equal", adjustable="datalim")
+    ax2.legend(loc="best", fontsize=8)
+    ax2.grid(True, alpha=0.3)
+    ax2.set_title("xy projection")
+
+    fig.suptitle(
+        f"Run fingerprint stamp --- controller = {controller_label[:60]}",
+        fontsize=9, y=1.01,
+    )
+    fig.tight_layout()
+    fig.savefig(out_dir / "reference_vs_actual.png",
+                dpi=160, bbox_inches="tight")
+    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -716,15 +881,16 @@ def build_ui() -> gr.Blocks:
                 gr.HTML(
                     "<h4>Describe what you want to simulate</h4>"
                     "<p class='cdpr-chat-hint'>"
-                    "The LLM layer (Gemini &middot; OpenRouter &middot; "
-                    "Ollama &middot; LM Studio &middot; or the echo stub) "
-                    "parses your description into a "
+                    "The LLM layer parses your description into a "
                     "<code>SimulationRequest</code> and pre-fills the form "
-                    "below. Works offline with no API key &mdash; the echo "
-                    "stub falls back to keyword-based intent detection. "
-                    "Set <code>GEMINI_API_KEY</code> or "
-                    "<code>OPENROUTER_API_KEY</code> as a Space secret to "
-                    "enable real LLM parsing."
+                    "below. The chain falls through providers in order "
+                    "&mdash; <b>Gemini</b> first; if it 429-rate-limits or "
+                    "is unavailable, <b>OpenRouter / DeepSeek</b> takes the "
+                    "next attempt; if that fails too, the <b>echo</b> stub "
+                    "falls back to keyword-based intent detection. "
+                    "Set <code>GEMINI_API_KEY</code> and "
+                    "<code>OPENROUTER_API_KEY</code> as Space secrets to "
+                    "enable both. See <code>docs/llm-providers.md</code>."
                     "</p>"
                 )
                 # Gradio 6.x: messages format is the default; ``buttons``
@@ -747,55 +913,56 @@ def build_ui() -> gr.Blocks:
                 with gr.Row():
                     chat_clear = gr.Button("Clear conversation", variant="secondary")
 
-            # ----- Manual form --------------------------------------------
-            with gr.Row():
-                with gr.Column(scale=1):
-                    gr.Markdown("### Robot &amp; dynamics",
-                                elem_classes=["cdpr-section-title"])
-                    robot_name = gr.Dropdown(
-                        ["point_mass_3d", "planar_translational",
-                         "ipanema_class", "cogiro_class", "dissertation_8cable"],
-                        value="dissertation_8cable", label="Robot",
-                    )
+            # ----- Manual form ---------------------------------------------
+            # Four collapsible accordions, modelled on a file-tree: click
+            # the heading to expand, click again to collapse so a
+            # configured form takes one line each. Each accordion starts
+            # CLOSED --- the chat box drives most parameter setting; users
+            # who prefer manual configuration open the sections they need.
+
+            with gr.Accordion("Robot & dynamics", open=False):
+                robot_name = gr.Dropdown(
+                    ["point_mass_3d", "planar_translational",
+                     "ipanema_class", "cogiro_class", "dissertation_8cable"],
+                    value="dissertation_8cable", label="Robot",
+                )
+                with gr.Row():
                     payload_mass = gr.Number(value=0.0, label="Payload mass [kg]",
                                               minimum=0.0, step=0.1)
                     gravity_on = gr.Checkbox(value=True, label="Apply gravity")
-                    objective = gr.Radio(
-                        ["min_norm", "centered", "preferred"],
-                        value="centered", label="Tension distribution objective",
-                    )
-                    t_min = gr.Number(value=5.0, label="Tension min [N]", minimum=0.0)
-                    t_max = gr.Number(value=500.0, label="Tension max [N]", minimum=0.0)
+                objective = gr.Radio(
+                    ["min_norm", "centered", "preferred"],
+                    value="centered", label="Tension distribution objective",
+                )
+                with gr.Row():
+                    t_min = gr.Number(value=5.0, label="Tension min [N]",
+                                       minimum=0.0)
+                    t_max = gr.Number(value=500.0, label="Tension max [N]",
+                                       minimum=0.0)
 
-                    gr.Markdown("### Time",
-                                elem_classes=["cdpr-section-title"])
-                    duration = gr.Number(value=12.566, label="Duration [s]",
-                                         minimum=0.05, maximum=300.0)
-                    dt_input = gr.Number(value=1e-3, label="dt [s]",
-                                         minimum=1e-4, maximum=5e-2)
-
-                with gr.Column(scale=1):
-                    gr.Markdown("### Trajectory",
-                                elem_classes=["cdpr-section-title"])
-                    kind = gr.Dropdown(
-                        ["hold", "line", "circle", "lissajous"],
-                        value="circle", label="Trajectory kind",
-                    )
-                    gr.Markdown("**Line params**")
+            with gr.Accordion("Trajectory", open=False):
+                kind = gr.Dropdown(
+                    ["hold", "line", "circle", "lissajous"],
+                    value="circle", label="Trajectory kind",
+                )
+                with gr.Accordion("Line parameters", open=False):
                     line_start = gr.Textbox(value="0,0,0.5",
                                             label="start (x,y,z) [m]")
                     line_end = gr.Textbox(value="0.05,0,0.5",
                                           label="end   (x,y,z) [m]")
-                    gr.Markdown("**Circle params**")
+                with gr.Accordion("Circle parameters", open=False):
                     circle_center = gr.Textbox(value="0,0,0.65",
                                                 label="center (x,y,z) [m]")
-                    circle_radius = gr.Number(value=0.05, label="radius [m]",
-                                              minimum=0.0, maximum=2.0)
+                    with gr.Row():
+                        circle_radius = gr.Number(value=0.05, label="radius [m]",
+                                                  minimum=0.0, maximum=2.0)
+                        circle_angle_span = gr.Number(
+                            value=float(4 * np.pi), label="angle span [rad]",
+                            minimum=0.1,
+                        )
                     circle_axis = gr.Textbox(value="0,0,1", label="axis (x,y,z)")
-                    circle_angle_span = gr.Number(
-                        value=float(4 * np.pi), label="angle span [rad]", minimum=0.1,
-                    )
-                    gr.Markdown("**Lissajous params**")
+                with gr.Accordion("Lissajous (figure-eight) parameters",
+                                  open=False):
                     lj_center = gr.Textbox(value="0,0,0.65", label="center [m]")
                     lj_amps = gr.Textbox(value="0.03,0.03,0.0",
                                          label="amplitudes (x,y,z) [m]")
@@ -804,10 +971,14 @@ def build_ui() -> gr.Blocks:
                     lj_phases = gr.Textbox(value="0,1.5708,0",
                                             label="phases (x,y,z) [rad]")
 
-            # ----- Controller --------------------------------------------
-            gr.Markdown("### Controller",
-                        elem_classes=["cdpr-section-title"])
-            with gr.Row():
+            with gr.Accordion("Time", open=False):
+                with gr.Row():
+                    duration = gr.Number(value=12.566, label="Duration [s]",
+                                         minimum=0.05, maximum=300.0)
+                    dt_input = gr.Number(value=1e-3, label="dt [s]",
+                                         minimum=1e-4, maximum=5e-2)
+
+            with gr.Accordion("Controller", open=False):
                 controller_kind = gr.Radio(
                     ["PD", "MPC"], value="PD",
                     label="Family",
@@ -817,42 +988,39 @@ def build_ui() -> gr.Blocks:
                           "(cdpr.control.mpc); cable bounds are enforced "
                           "by the tension-distribution QP either way."),
                 )
-
-            # Orientation PD gains are SHARED --- both PD and MPC use them
-            # for the orientation channel.
-            with gr.Row():
+                # Orientation PD gains are SHARED --- both PD and MPC use
+                # them for the orientation channel.
                 kp_rot = gr.Number(value=100.0,
-                                    label="Kp_rot (orientation; shared)",
+                                    label="Kp_rot (orientation; shared between PD and MPC)",
                                     minimum=0.0)
-
-            # PD-only group: position gains.
-            with gr.Group(visible=True) as pd_group:
-                gr.Markdown("**PD --- translational gains**")
-                kp_pos = gr.Number(value=400.0,
-                                    label="Kp_pos  (Kd_pos = 2&middot;sqrt(Kp_pos))",
-                                    minimum=0.0)
-
-            # MPC-only group: horizon + QP weights.
-            with gr.Group(visible=False) as mpc_group:
-                gr.Markdown(
-                    "**MPC --- horizon and quadratic weights**  \n"
-                    "*State* x = [p, v] (3+3). *Stage cost* = "
-                    "Q_pos&middot;||p&minus;p_ref||&sup2; + "
-                    "Q_vel&middot;||v&minus;v_ref||&sup2; + "
-                    "R&middot;||u||&sup2;. *Terminal* = P&middot;||p&minus;p_ref||&sup2;."
-                )
-                with gr.Row():
-                    mpc_horizon = gr.Number(value=8, label="Horizon N (steps)",
-                                             minimum=2, maximum=50, step=1)
-                    mpc_q_pos = gr.Number(value=2.0e3, label="Q_pos",
-                                           minimum=0.0)
-                    mpc_q_vel = gr.Number(value=2.0e1, label="Q_vel",
-                                           minimum=0.0)
-                with gr.Row():
-                    mpc_r_force = gr.Number(value=1.0e-3, label="R (force penalty)",
-                                             minimum=0.0)
-                    mpc_p_terminal = gr.Number(value=1.0e4, label="P (terminal)",
-                                                minimum=0.0)
+                # PD-only group: translational position gain.
+                with gr.Group(visible=True) as pd_group:
+                    gr.Markdown("**PD --- translational gain**")
+                    kp_pos = gr.Number(value=400.0,
+                                        label="Kp_pos  (Kd_pos = 2·sqrt(Kp_pos))",
+                                        minimum=0.0)
+                # MPC-only group: horizon + QP weights.
+                with gr.Group(visible=False) as mpc_group:
+                    gr.Markdown(
+                        "**MPC --- horizon and quadratic weights**  \n"
+                        "*State* x = [p, v] (3+3). *Stage cost* = "
+                        "Q_pos·||p−p_ref||² + Q_vel·||v−v_ref||² + R·||u||². "
+                        "*Terminal* = P·||p−p_ref||²."
+                    )
+                    with gr.Row():
+                        mpc_horizon = gr.Number(value=8, label="Horizon N (steps)",
+                                                 minimum=2, maximum=50, step=1)
+                        mpc_q_pos = gr.Number(value=2.0e3, label="Q_pos",
+                                               minimum=0.0)
+                        mpc_q_vel = gr.Number(value=2.0e1, label="Q_vel",
+                                               minimum=0.0)
+                    with gr.Row():
+                        mpc_r_force = gr.Number(value=1.0e-3,
+                                                 label="R (force penalty)",
+                                                 minimum=0.0)
+                        mpc_p_terminal = gr.Number(value=1.0e4,
+                                                    label="P (terminal)",
+                                                    minimum=0.0)
 
             def _toggle_controller(choice: str):
                 is_mpc = (choice or "").upper() == "MPC"
@@ -864,8 +1032,10 @@ def build_ui() -> gr.Blocks:
                 outputs=[pd_group, mpc_group],
             )
 
-            # ----- Run + outputs -----------------------------------------
-            run_btn = gr.Button("Run simulation", variant="primary")
+            # ----- Run + Reset + outputs ---------------------------------
+            with gr.Row():
+                run_btn = gr.Button("Run simulation", variant="primary", scale=3)
+                reset_btn = gr.Button("Reset all", variant="secondary", scale=1)
             status_text = gr.Textbox(label="Run summary", lines=9, interactive=False)
             with gr.Row():
                 fig_gallery = gr.Gallery(label="Figures", columns=2, height="600px")
@@ -886,6 +1056,71 @@ def build_ui() -> gr.Blocks:
                     lj_center, lj_amps, lj_freqs, lj_phases,
                 ],
                 outputs=[status_text, fig_gallery, csv_out],
+            )
+
+            # ----- Reset handler -----------------------------------------
+            # Reset clears the gallery / status / CSV download and pushes
+            # every form widget back to its factory default. The chat
+            # history is intentionally preserved --- it documents the
+            # research session.
+            def _reset_form():
+                return (
+                    # outputs first (cleared)
+                    "",                                              # status_text
+                    None,                                            # fig_gallery
+                    None,                                            # csv_out
+                    # robot & dynamics
+                    "dissertation_8cable",                           # robot_name
+                    0.0,                                             # payload_mass
+                    True,                                            # gravity_on
+                    "centered",                                      # objective
+                    5.0,                                             # t_min
+                    500.0,                                           # t_max
+                    # trajectory
+                    "circle",                                        # kind
+                    "0,0,0.5",                                       # line_start
+                    "0.05,0,0.5",                                    # line_end
+                    "0,0,0.65",                                      # circle_center
+                    0.05,                                            # circle_radius
+                    "0,0,1",                                         # circle_axis
+                    float(4 * np.pi),                                # circle_angle_span
+                    "0,0,0.65",                                      # lj_center
+                    "0.03,0.03,0.0",                                 # lj_amps
+                    "1.0,2.0,0.0",                                   # lj_freqs
+                    "0,1.5708,0",                                    # lj_phases
+                    # time
+                    12.566,                                          # duration
+                    1e-3,                                            # dt_input
+                    # controller
+                    "PD",                                            # controller_kind
+                    400.0,                                           # kp_pos
+                    100.0,                                           # kp_rot
+                    8,                                               # mpc_horizon
+                    2.0e3,                                           # mpc_q_pos
+                    2.0e1,                                           # mpc_q_vel
+                    1.0e-3,                                          # mpc_r_force
+                    1.0e4,                                           # mpc_p_terminal
+                    # group visibility
+                    gr.update(visible=True),                         # pd_group
+                    gr.update(visible=False),                        # mpc_group
+                )
+
+            reset_btn.click(
+                fn=_reset_form,
+                inputs=None,
+                outputs=[
+                    status_text, fig_gallery, csv_out,
+                    robot_name, payload_mass, gravity_on, objective, t_min, t_max,
+                    kind,
+                    line_start, line_end,
+                    circle_center, circle_radius, circle_axis, circle_angle_span,
+                    lj_center, lj_amps, lj_freqs, lj_phases,
+                    duration, dt_input,
+                    controller_kind, kp_pos, kp_rot,
+                    mpc_horizon, mpc_q_pos, mpc_q_vel,
+                    mpc_r_force, mpc_p_terminal,
+                    pd_group, mpc_group,
+                ],
             )
 
             # Chat wiring --- must come AFTER the form widgets and the

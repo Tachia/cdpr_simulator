@@ -132,6 +132,26 @@ specific one regardless of which keys exist:
 CDPR_LLM_PROVIDER=openrouter
 ```
 
+### Automatic fallback chain
+
+The conversational simulation builder doesn't stop at one provider —
+it walks a chain in order until one returns a parseable response.
+Default chain (when `CDPR_LLM_FALLBACK_CHAIN` is unset): every
+provider whose env var is configured, in the priority order above,
+with the echo stub appended at the end so the call never raises.
+
+Pin a custom chain via env var:
+
+```
+CDPR_LLM_FALLBACK_CHAIN=gemini,openrouter,ollama,echo
+```
+
+Why this matters: Gemini's free tier rate-limits aggressively
+(HTTP 429). When the limit hits, the chain rolls over to OpenRouter,
+parses the description there, and the user never sees the failure
+in the form — only in the chat reply's *Notes* section, which lists
+which provider answered and which providers it tried first.
+
 ## Step 4 — Deployment secrets
 
 Never commit `.env`. The repo's `.gitignore` already excludes it.

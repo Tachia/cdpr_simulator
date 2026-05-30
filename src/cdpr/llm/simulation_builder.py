@@ -37,7 +37,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from cdpr.interface.specs import SimulationRequest, TrajectorySpec
-from cdpr.llm import LLMMessage, LLMUnavailableError, build_provider
+from cdpr.llm import (
+    LLMMessage,
+    LLMUnavailableError,
+    build_provider,
+    resolve_fallback_chain,
+)
 
 
 # Secret-scrub pattern applied to any error string that surfaces in
@@ -111,14 +116,27 @@ def describe_to_request(
     description: str,
     *,
     provider: str | None = None,
+    fallback_chain: list[str] | None = None,
 ) -> BuilderResult:
     """Parse ``description`` into a :class:`SimulationRequest`.
 
-    On failure (LLM unreachable, malformed JSON, etc.) returns a
-    conservative default request with the failure noted in
-    ``notes`` --- the directive's "never crash" rule.
+    Walks a chain of providers in order; the first one that returns
+    parseable JSON wins. When a provider raises
+    :class:`LLMUnavailableError` (rate limit, model retired, network
+    failure, etc.) the chain continues to the next one and records
+    the failure in ``notes``. The echo stub is always at the end so
+    the call never raises --- the directive's 'never crash' rule.
+
+    When ``provider`` is given, it pins a single provider (no fallback).
+    Otherwise the chain comes from ``fallback_chain`` or
+    :func:`cdpr.llm.config.resolve_fallback_chain` (which honours
+    ``CDPR_LLM_FALLBACK_CHAIN``).
     """
-    llm = build_provider(provider)
+    if provider:
+        chain = [provider]
+    else:
+        chain = list(fallback_chain or resolve_fallback_chain())
+
     messages = [
         LLMMessage(role="system", content=_SYSTEM_PROMPT),
         LLMMessage(role="user", content=description.strip()),
@@ -126,27 +144,59 @@ def describe_to_request(
     raw_text = ""
     parsed: dict[str, Any] = {}
     notes: list[str] = []
-    try:
-        resp = llm.complete(messages, max_tokens=900, temperature=0.0)
+    tried: list[str] = []
+    winner_provider = ""
+    winner_model = ""
+
+    for name in chain:
+        tried.append(name)
+        try:
+            llm = build_provider(name)
+        except LLMUnavailableError as exc:
+            notes.append(
+                f"Provider {name!r} unavailable at construction: "
+                f"{_redact(str(exc))}. Trying next in chain."
+            )
+            continue
+
+        try:
+            resp = llm.complete(messages, max_tokens=900, temperature=0.0)
+        except LLMUnavailableError as exc:
+            notes.append(
+                f"Provider {name!r} call failed: {_redact(str(exc))}. "
+                "Trying next in chain."
+            )
+            continue
+
+        # Got a response; try to extract JSON. JSON failures from a
+        # real LLM are not retryable on a different LLM (echo, in
+        # particular, never returns valid JSON), but we still want the
+        # raw text in the result for audit. Treat 'no JSON' the same
+        # way as 'no provider' so the fallback chain keeps trying.
         raw_text = resp.text
-        parsed = _extract_json(raw_text)
-    except LLMUnavailableError as exc:
-        notes.append(
-            f"LLM provider {llm.name!r} is unavailable: {_redact(str(exc))}. "
-            "Returning a conservative default request."
-        )
-    except (ValueError, KeyError) as exc:
-        notes.append(
-            f"LLM response was not valid JSON: {_redact(str(exc))}. "
-            "Returning a conservative default request."
-        )
+        winner_provider = getattr(llm, "name", name)
+        winner_model = getattr(llm, "model", "")
+        try:
+            parsed = _extract_json(raw_text)
+            break
+        except (ValueError, KeyError) as exc:
+            notes.append(
+                f"Provider {name!r} returned non-JSON text: "
+                f"{_redact(str(exc))}. Trying next in chain."
+            )
+            # Clear parsed so the next iteration starts fresh.
+            parsed = {}
+            continue
 
     request, confidence = _request_from_parsed(parsed, description, notes)
 
+    if tried:
+        notes.append("Provider chain tried: " + " -> ".join(tried))
+
     return BuilderResult(
         request=request,
-        provider=getattr(llm, "name", ""),
-        model=getattr(llm, "model", ""),
+        provider=winner_provider,
+        model=winner_model,
         raw_text=raw_text,
         confidence=confidence,
         follow_up_questions=list(parsed.get("follow_up_questions", []) or []),

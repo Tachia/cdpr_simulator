@@ -31,6 +31,7 @@ except ImportError:                                                  # pragma: n
 
 
 _DEFAULT_PROVIDER_ENV = "CDPR_LLM_PROVIDER"
+_FALLBACK_CHAIN_ENV = "CDPR_LLM_FALLBACK_CHAIN"
 
 # Canonical env-var names. These are referenced by the providers and
 # documented in .env.example and docs/llm-providers.md.
@@ -138,3 +139,33 @@ def available_providers() -> dict[str, bool]:
         "lmstudio":   bool(os.environ.get(LMSTUDIO_URL_ENV)),
         "echo":       True,
     }
+
+
+def resolve_fallback_chain(explicit: str | None = None) -> list[str]:
+    """Return the ordered list of providers to try in sequence.
+
+    The chain comes from (in priority order):
+
+      1. The ``explicit`` argument, when a caller pins a chain.
+      2. The ``CDPR_LLM_FALLBACK_CHAIN`` env var, comma-separated.
+      3. An auto-built chain from the configured providers in the
+         standard priority (gemini -> openrouter -> ollama -> lmstudio),
+         with the echo stub appended unconditionally as the final
+         fall-back so the simulator never crashes.
+
+    Unknown provider names are silently dropped. The echo stub is
+    appended if missing so the chain always ends in something callable.
+    """
+    _try_load_env()
+    raw = explicit or os.environ.get(_FALLBACK_CHAIN_ENV) or ""
+    if raw.strip():
+        candidates = [c.strip().lower() for c in raw.split(",") if c.strip()]
+    else:
+        configured = available_providers()
+        candidates = [name for name in ("gemini", "openrouter",
+                                         "ollama", "lmstudio")
+                      if configured.get(name)]
+    chain = [c for c in candidates if c in PROVIDER_NAMES]
+    if "echo" not in chain:
+        chain.append("echo")
+    return chain
