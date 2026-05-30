@@ -6,11 +6,11 @@ and runs ``python app.py`` at boot. Keeping this file tiny means the
 entrypoint contract is stable; UI changes happen in ``gradio_app.py``.
 """
 
-from gradio_app import demo
+from gradio_app import demo, _CSS
 
-# Theme on launch() (Gradio 6.0 deprecation: theme moved off Blocks()).
-# Lazy import keeps app.py importable without gradio when a tool only
-# wants to introspect the module.
+# Theme + CSS now live on launch() per Gradio 6.0. Lazy import keeps
+# app.py importable without gradio when a tool only wants to introspect
+# the module.
 try:
     import gradio as gr
     _theme = gr.themes.Soft()
@@ -28,4 +28,5 @@ if __name__ == "__main__":
         server_port=7860,
         show_error=True,
         theme=_theme,
+        css=_CSS,
     )
