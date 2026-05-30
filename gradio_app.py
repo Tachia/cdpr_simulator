@@ -355,9 +355,11 @@ def _compare_uploaded_csv(file_obj, epochs: int, rl_steps: int) -> tuple[str, li
 # ---------------------------------------------------------------------------
 
 def build_ui() -> gr.Blocks:
+    # Gradio 6.0 moved ``theme`` from the Blocks() constructor to
+    # ``launch(theme=...)``. We pass theme via launch() below; the
+    # Blocks-level params here are the ones that still work.
     with gr.Blocks(
         title="CDPR Simulator",
-        theme=gr.themes.Soft(),
         analytics_enabled=False,
     ) as demo:
         gr.Markdown(
@@ -552,6 +554,9 @@ if __name__ == "__main__":
         server_name=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
         server_port=int(os.environ.get("GRADIO_SERVER_PORT", "7860")),
         show_error=True,
+        # Gradio 6.0 expects theme here, not on Blocks().
+        # Soft is the closest match to the previous look.
+        theme=gr.themes.Soft(),
         # share=True would give a temporary tunnel URL --- uncomment
         # if you need a public link without going through HF Spaces.
         # share=True,
