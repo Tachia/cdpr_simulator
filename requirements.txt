@@ -1,29 +1,58 @@
-# Lean install for hosts that prefer pip + requirements.txt over pyproject
-# extras (notably Streamlit Community Cloud, whose Poetry-based installer
-# chokes on pyproject extras that reference each other).
+# Hugging Face Spaces + Streamlit Community Cloud requirements file.
+#
+# Auto-discovered by HF Spaces (Gradio SDK), Streamlit Cloud, and any
+# other host that ingests requirements.txt from the repo root.
+#
+# Both gradio_app.py and streamlit_app.py prepend ``src/`` to sys.path
+# at startup, so we do NOT install the cdpr package itself via pip here
+# --- pip's ``.`` directive fails on HF (WORKDIR /app, but the repo is
+# copied to /, so pyproject.toml is not at the expected location). The
+# explicit numpy/scipy/etc. install below + the sys.path injection in
+# each app file together provide everything the apps need at runtime.
 #
 # Local development still uses the canonical:
-#     pip install -e ".[dev,viz,data,api,gui]"
+#     pip install -e ".[dev,viz,data,api,gui,gradio,dash]"
 #
-# What's in here = what the deployed Streamlit research console needs.
-#
-# Cache-bust marker: bump this when forcing Streamlit Cloud to discard a
-# cached worker venv after a behavioural change in cdpr.interface.gui.
-# rebuild: 2026-05-29-a
+# Cache-bust marker (bump to force HF / Streamlit Cloud to re-build):
+#   rebuild: 2026-05-30-a
 
+# ---------------------------------------------------------------------------
+# UI frameworks
+# ---------------------------------------------------------------------------
+gradio>=4.40
 streamlit>=1.32
 
-# Backend wire (the GUI calls the FastAPI service over HTTP).
-httpx>=0.27
+# ---------------------------------------------------------------------------
+# Scientific core (the cdpr package's hard dependencies)
+# ---------------------------------------------------------------------------
+numpy>=1.24
+scipy>=1.11
+sympy>=1.12
 
-# Visualisation + ingestion + scientific core deps.
+# ---------------------------------------------------------------------------
+# Visualisation + ingestion
+# ---------------------------------------------------------------------------
 matplotlib>=3.8
 pillow>=10.0
 pandas>=2.1
 openpyxl>=3.1
-numpy>=1.24
-scipy>=1.11
 
-# Install the cdpr package itself --- hatchling builds from pyproject.toml.
-# (no extras listed: this file already names everything the GUI needs)
-.
+# ---------------------------------------------------------------------------
+# HTTP client (FastAPI + Render API calls)
+# ---------------------------------------------------------------------------
+httpx>=0.27
+
+# ---------------------------------------------------------------------------
+# Phase-2 model paths --- CPU wheels keep install size manageable.
+# torch keeps both Streamlit and Gradio's upload-and-train tabs working.
+# ---------------------------------------------------------------------------
+torch>=2.2
+gymnasium>=0.29
+stable-baselines3>=2.3
+
+# ---------------------------------------------------------------------------
+# LLM provider extras (no API keys are required at install time --- the
+# echo provider always works; real providers activate when GEMINI_API_KEY
+# etc. are set as Space secrets). See docs/llm-providers.md.
+# ---------------------------------------------------------------------------
+python-dotenv>=1.0
