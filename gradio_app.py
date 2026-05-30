@@ -439,12 +439,38 @@ def _run_custom_simulation(
 # untouched --- the "never crash" rule from the directive.
 
 
-_FORM_FIELD_COUNT = 16   # robot, kind, duration, dt, payload, objective, +
-                         # 2 line + 4 circle + 4 lissajous params = 16.
+# 16 trajectory/dynamics fields + 1 controller_kind + 2 group-visibility
+# toggles (pd_group, mpc_group) = 19 form-side outputs from the chat
+# handler. _no_form_changes() supplies the matching "do nothing" tuple
+# for the empty-message + parser-failure branches.
+_FORM_FIELD_COUNT = 19
 
 
 def _no_form_changes() -> tuple[Any, ...]:
     return tuple(gr.update() for _ in range(_FORM_FIELD_COUNT))
+
+
+def _infer_controller(text: str) -> str | None:
+    """Heuristic: scan the description for an explicit controller hint
+    and return 'MPC' / 'PD' / None. Used so the chat box can flip the
+    controller radio when the user says 'use MPC' --- the LLM layer
+    parses trajectory and robot, but controller choice is a frontend
+    concern, not a SimulationRequest field."""
+    s = (text or "").lower()
+    # MPC patterns
+    if ("mpc" in s
+            or "model predictive" in s
+            or "predictive control" in s
+            or "receding horizon" in s
+            or "receding-horizon" in s):
+        return "MPC"
+    # PD patterns --- require word boundaries so 'pd' inside other words
+    # doesn't trigger a false positive.
+    if ("pd controller" in s
+            or "proportional derivative" in s
+            or "proportional-derivative" in s):
+        return "PD"
+    return None
 
 
 def _xyz_str(value: Any, default: str) -> str:
@@ -488,10 +514,18 @@ def _chat_to_form(message: str, history: list[dict[str, str]] | None):
     params = dict(req.trajectory.params or {})
     kind = req.trajectory.kind
 
+    # Controller hint comes from the original message text (the LLM
+    # parser deliberately doesn't put controller in SimulationRequest
+    # --- it is a frontend choice). Falling back to PD when unspecified
+    # keeps the UI deterministic and matches the form's default.
+    controller_hint = _infer_controller(msg) or "PD"
+    is_mpc = controller_hint == "MPC"
+
     # Build assistant reply summarising what was parsed.
     bullets = [
         f"- robot: `{req.robot}`",
         f"- trajectory: `{kind}`",
+        f"- controller: `{controller_hint}`",
         f"- duration: `{req.duration:g} s`  &middot;  dt: `{req.dt:g} s`",
         f"- payload: `{req.payload_mass:g} kg`",
         f"- objective: `{req.tension_objective}`",
@@ -520,7 +554,10 @@ def _chat_to_form(message: str, history: list[dict[str, str]] | None):
     # Emit form updates. We always update every group's defaults so the
     # user can switch trajectory kind after the parse without losing
     # context --- the params dict for the chosen kind contributes, and
-    # the others get sensible fallbacks.
+    # the others get sensible fallbacks. The last three updates flip
+    # the controller radio and the conditional PD/MPC gain groups; in
+    # Gradio 6 a programmatic value change does not re-fire the radio's
+    # .change() listener, so we set both visibilities here explicitly.
     return (
         hist,
         "",                                              # clear chat input
@@ -540,6 +577,9 @@ def _chat_to_form(message: str, history: list[dict[str, str]] | None):
         gr.update(value=_xyz_str(params.get("amplitudes"),  "0.03,0.03,0")),
         gr.update(value=_xyz_str(params.get("frequencies"), "1,2,0")),
         gr.update(value=_xyz_str(params.get("phases"),      "0,1.5708,0")),
+        gr.update(value=controller_hint),                # controller_kind
+        gr.update(visible=not is_mpc),                   # pd_group
+        gr.update(visible=is_mpc),                       # mpc_group
     )
 
 
@@ -848,7 +888,11 @@ def build_ui() -> gr.Blocks:
                 outputs=[status_text, fig_gallery, csv_out],
             )
 
-            # Chat wiring --- must come AFTER the form widgets exist.
+            # Chat wiring --- must come AFTER the form widgets and the
+            # controller group definitions exist. The trailing three
+            # outputs (controller_kind, pd_group, mpc_group) let a chat
+            # prompt that mentions 'MPC' flip the radio AND reveal the
+            # MPC fields in one round-trip.
             chat_outputs = [
                 chatbot, chat_input,
                 robot_name, kind, duration, dt_input,
@@ -856,6 +900,7 @@ def build_ui() -> gr.Blocks:
                 line_start, line_end,
                 circle_center, circle_radius, circle_axis, circle_angle_span,
                 lj_center, lj_amps, lj_freqs, lj_phases,
+                controller_kind, pd_group, mpc_group,
             ]
             chat_send.click(
                 fn=_chat_to_form,
