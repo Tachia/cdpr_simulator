@@ -1,4 +1,4 @@
-"""Definitive diagnostic for the 'pre-receive hook declined' HF push error.
+r"""Definitive diagnostic for the 'pre-receive hook declined' HF push error.
 
 Calls Hugging Face's REST API directly with a token you provide, so we
 can compare the token's REAL account against the Space's REAL owner.
@@ -8,19 +8,20 @@ Usage::
 
     # Token in environment (preferred --- never echoed):
     $env:HF_TOKEN = "hf_..."
-    python scripts\diagnose_hf_push.py
+    python scripts/diagnose_hf_push.py
 
     # Or pass it explicitly (not recommended; ends up in shell history):
-    python scripts\diagnose_hf_push.py --token hf_...
+    python scripts/diagnose_hf_push.py --token hf_...
 
-The output answers four questions:
+The output answers five questions:
 
     1. Is the token valid?
     2. Which HF account does it belong to?
-    3. Does spaces/JoeTach/cdpr-simulator actually exist?
-    4. Does the token's account have write access to it?
+    3. What is the token's role / scope? (Read / Write / Fine-grained)
+    4. Does spaces/JoeTach/cdpr-simulator actually exist?
+    5. Is the user's email verified? (HF requires this for some pushes)
 
-If any of the four is wrong, the script prints the exact next step.
+If any of the five is wrong, the script prints the exact next step.
 """
 
 from __future__ import annotations
@@ -120,8 +121,33 @@ def main(argv: list[str] | None = None) -> int:
     token_type = me.get("type") or "?"
     token_orgs = [o.get("name") for o in (me.get("orgs") or [])
                   if isinstance(o, dict)]
+    email_verified = me.get("emailVerified", True)
+
+    # Token scope / role lives under auth.accessToken.role (and
+    # auth.accessToken.fineGrained if it's a fine-grained token).
+    # These fields are the actual deciders of whether the token can
+    # write --- whoami succeeding only means the token authenticates.
+    auth_block = me.get("auth") or {}
+    access_token = auth_block.get("accessToken") or {}
+    token_role = access_token.get("role") or "?"
+    token_display = access_token.get("displayName") or "?"
+    fine_grained = access_token.get("fineGrained") or {}
+    fg_scopes = fine_grained.get("scoped") if isinstance(fine_grained, dict) else None
+
     print(f"  -> token belongs to user : {token_user!r}")
     print(f"  -> token type            : {token_type!r}")
+    print(f"  -> email verified        : {email_verified}")
+    print(f"  -> token display name    : {token_display!r}")
+    print(f"  -> token role / scope    : {token_role!r}")
+    if fg_scopes:
+        print(f"  -> token is FINE-GRAINED; granted permissions:")
+        for scope in fg_scopes:
+            entity = scope.get("entity") or {}
+            permissions = scope.get("permissions") or []
+            print(f"        - {entity.get('type','?')} {entity.get('name','?')}: "
+                  f"{permissions}")
+    elif fine_grained:
+        print(f"  -> token is fine-grained but no scopes parsed: {fine_grained}")
     print(f"  -> orgs the user is in   : {token_orgs}")
     print()
 
@@ -150,14 +176,104 @@ def main(argv: list[str] | None = None) -> int:
     print("-" * 60)
     if token_user == args.owner:
         if info:
-            print(f"GOOD: token user '{token_user}' matches Space owner.")
+            print(f"Identity OK: token user '{token_user}' matches Space owner.")
+            print(f"Email verified: {email_verified}")
             print()
-            print("The push SHOULD work. If it doesn't, the most likely cause is")
-            print("that the token does not have Write scope (it might be Read or")
-            print("a fine-grained token without the right Space granted). Open:")
-            print("  https://huggingface.co/settings/tokens")
-            print("and confirm the token's row says 'Type: Write'. If not, create")
-            print("a fresh Write-scope token and retry.")
+
+            # Scope check is now the deciding factor.
+            target_path = f"{args.owner}/{args.space}"
+            if str(token_role).lower() in {"write", "admin"}:
+                role_ok = True
+            elif fg_scopes:
+                role_ok = False
+                for scope in fg_scopes:
+                    entity = (scope.get("entity") or {})
+                    name = entity.get("name") or ""
+                    perms = scope.get("permissions") or []
+                    has_write = any(
+                        p in {"write", "repo.write", "repo.content.write",
+                              "repos.write", "space.write"}
+                        for p in perms
+                    )
+                    if name in {target_path, args.owner} and has_write:
+                        role_ok = True
+                        break
+            else:
+                role_ok = False
+
+            if not email_verified:
+                print("ROOT CAUSE: email is not verified on the JoeTach account.")
+                print("HF blocks pushes from accounts whose email is unverified.")
+                print()
+                print("Fix:")
+                print("  1. Open https://huggingface.co/settings/account")
+                print("  2. Find the email row; click 'Resend' or 'Verify'")
+                print("  3. Open the verification email from HF and click the link")
+                print("  4. Re-run this script. It should print 'email verified: True'.")
+                print("  5. Retry the push.")
+                return 7
+
+            if not role_ok:
+                if str(token_role).lower() == "read":
+                    print("ROOT CAUSE: the token has READ scope only.")
+                    print("HF rejects writes from Read-scope tokens regardless of who")
+                    print("created them. The verdict 'GOOD' earlier was about identity")
+                    print("only --- HF stores role separately from authentication.")
+                    print()
+                    print("Fix (one minute):")
+                    print("  1. Open https://huggingface.co/settings/tokens")
+                    print("  2. Click 'New token'")
+                    print(f"  3. Name: 'cdpr-deploy-{args.space}'")
+                    print("  4. Token type: SELECT WRITE (the FIRST dropdown option,")
+                    print("     not the default 'Fine-grained').")
+                    print("  5. Click Generate; copy the hf_... value")
+                    print("  6. Retry the push with the new token.")
+                    return 8
+                elif fg_scopes is not None:
+                    print("ROOT CAUSE: the token is FINE-GRAINED and does NOT grant")
+                    print(f"            write access to '{target_path}'.")
+                    print()
+                    print("Fine-grained tokens require you to EXPLICITLY list every")
+                    print("repo or Space they can touch. The default Generate flow on")
+                    print("HF makes fine-grained tokens by default, which trips a lot")
+                    print("of users.")
+                    print()
+                    print("Fix --- pick ONE:")
+                    print()
+                    print("  A. (simplest) Create a classic Write token instead:")
+                    print("     1. https://huggingface.co/settings/tokens")
+                    print("     2. New token -> Token TYPE = Write (top of the dropdown)")
+                    print("     3. Generate, copy, retry the push.")
+                    print()
+                    print("  B. Or edit the current fine-grained token:")
+                    print("     1. https://huggingface.co/settings/tokens")
+                    print(f"     2. Click your token row ('{token_display}')")
+                    print("     3. Under 'Repositories permissions', click +Add")
+                    print(f"     4. Add: spaces/{target_path} with permission Write")
+                    print("     5. Save, retry the push (no new token needed).")
+                    return 9
+                else:
+                    print(f"ROOT CAUSE: token role is {token_role!r} (not Write).")
+                    print()
+                    print("Generate a fresh Write-scope token at")
+                    print("  https://huggingface.co/settings/tokens")
+                    print("with Token type = Write.")
+                    return 10
+
+            # Identity OK + role OK + email verified --- HF should accept this.
+            print(f"GOOD: token user '{token_user}' matches Space owner '{args.owner}',")
+            print(f"      role is {token_role!r}, email is verified.")
+            print()
+            print("All known auth blockers are clear. The push should succeed.")
+            print()
+            print("If a push STILL fails after this verdict:")
+            print(" - Check the Space's Settings -> Variables and secrets -> the")
+            print("   Space might be paused or marked archived.")
+            print(" - Check https://status.huggingface.co/ for active incidents.")
+            print(" - Try pushing the same token via:")
+            print("       git ls-remote https://USERNAME:TOKEN@huggingface.co/spaces/USER/SPACE")
+            print("   to see whether the rejection is at the *receive* stage or")
+            print("   the *fetch* stage.")
             return 0
         else:
             print(f"PROBABLE FIX: the Space '{args.owner}/{args.space}' does")
