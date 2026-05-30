@@ -40,9 +40,14 @@ OLLAMA_URL_ENV: Final = "OLLAMA_URL"
 LMSTUDIO_URL_ENV: Final = "LMSTUDIO_URL"
 
 # Default model identifiers per provider. Users can override via the
-# matching env var (e.g. ``GEMINI_MODEL=gemini-1.5-pro``).
+# matching env var (e.g. ``GEMINI_MODEL=gemini-2.5-flash``).
+#
+# Google retired the gemini-1.5 family in mid-2025; the endpoint now
+# returns 404. ``gemini-2.0-flash`` is the current free-tier successor
+# (1M token context, same JSON-structured-output behaviour) and is the
+# new default. ``gemini-2.5-flash`` works too if you've enabled it.
 DEFAULT_MODELS: Final[dict[str, str]] = {
-    "gemini":     "gemini-1.5-flash",
+    "gemini":     "gemini-2.0-flash",
     "openrouter": "deepseek/deepseek-r1",                            # math reasoning default
     "ollama":     "llama3",
     "lmstudio":   "local-model",

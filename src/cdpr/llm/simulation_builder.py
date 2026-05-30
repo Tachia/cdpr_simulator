@@ -40,6 +40,23 @@ from cdpr.interface.specs import SimulationRequest, TrajectorySpec
 from cdpr.llm import LLMMessage, LLMUnavailableError, build_provider
 
 
+# Secret-scrub pattern applied to any error string that surfaces in
+# ``BuilderResult.notes`` --- belt-and-braces, on top of the same
+# redaction the providers do at the raise site. If a future provider
+# misses the redaction, the chat box still won't leak the key.
+_SECRET_PATTERNS = (
+    re.compile(r"([?&])key=[^&\s'\"]+", flags=re.IGNORECASE),
+    re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]+", flags=re.IGNORECASE),
+)
+
+
+def _redact(text: str) -> str:
+    out = text
+    for pat in _SECRET_PATTERNS:
+        out = pat.sub(lambda m: f"{m.group(1)}<redacted>", out)
+    return out
+
+
 _SYSTEM_PROMPT = """\
 You are a parser for the CDPR Simulator. Convert the user's free-text
 description of a Cable-Driven Parallel Robot experiment into a JSON
@@ -115,12 +132,12 @@ def describe_to_request(
         parsed = _extract_json(raw_text)
     except LLMUnavailableError as exc:
         notes.append(
-            f"LLM provider {llm.name!r} is unavailable: {exc}. "
+            f"LLM provider {llm.name!r} is unavailable: {_redact(str(exc))}. "
             "Returning a conservative default request."
         )
     except (ValueError, KeyError) as exc:
         notes.append(
-            f"LLM response was not valid JSON: {exc}. "
+            f"LLM response was not valid JSON: {_redact(str(exc))}. "
             "Returning a conservative default request."
         )
 

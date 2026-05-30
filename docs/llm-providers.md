@@ -31,16 +31,33 @@ explaining simulation outputs.
 2. Open Google AI Studio: <https://aistudio.google.com/>
 3. Accept Google's AI terms of service.
 4. Click **Get API key** → **Create API key in new project**.
-5. **Copy the key** (starts with `AI…`) and keep it private.
+5. **Copy the key** and keep it private. Modern keys start with
+   `AIzaSy…` (classic format) or `AQ.Ab…` (the v2 format introduced
+   in 2025). Both authenticate the same way.
 6. In the project root, copy `.env.example` to `.env` and add:
    ```
-   GEMINI_API_KEY=AI...your_key...
+   GEMINI_API_KEY=<paste your key>
    ```
 7. Verify with the smoke script:
    ```powershell
    pip install python-dotenv             # picks up .env automatically
    python scripts\test_llm.py --provider gemini
    ```
+
+**Model choice.** The default is `gemini-2.0-flash`. Google retired
+the `gemini-1.5-flash` and `gemini-1.5-pro` models in mid-2025; calls
+to those endpoints now return HTTP 404 with a misleading "model not
+found" message. If you see a 404 from this provider, your
+`GEMINI_MODEL` env var is probably still pinned to the retired name
+--- delete the override (or update to one of):
+
+* `gemini-2.0-flash` --- general purpose, 1 M context, free tier (default)
+* `gemini-2.0-flash-lite` --- faster, smaller, free tier
+* `gemini-2.5-flash` --- newer, free tier where available
+
+The key is sent via the `x-goog-api-key` HTTP header rather than the
+URL query string, so a 404 / 401 message that quotes the request URL
+will *not* leak your key into the chat box or the build log.
 
 ### OpenRouter (DeepSeek-R1 + DeepSeek-V3)
 
