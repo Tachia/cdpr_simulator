@@ -71,6 +71,13 @@ dash = [
   "dash>=2.17",
   "plotly>=5.22",
 ]
+llm = [
+  # cdpr.llm runs on stdlib alone. These optional deps just polish
+  # things: httpx for proper connection reuse on hot paths, dotenv so
+  # .env is auto-loaded.
+  "python-dotenv>=1.0",
+  "httpx>=0.27",
+]
 storage = [
   "supabase>=2.4",
 ]
