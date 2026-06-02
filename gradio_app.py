@@ -1220,6 +1220,18 @@ def build_ui() -> gr.Blocks:
     return demo
 
 
+# Pre-warm the LLM provider chain at module load time, BEFORE the
+# Blocks are built. This pays the GeminiProvider / OpenRouterProvider
+# construction cost (a few hundred ms on a cold HF worker) once at boot
+# instead of on the user's first chat. The function is best-effort and
+# silently moves on if a provider can't be built (no API key, etc.).
+try:
+    from cdpr.llm.simulation_builder import prewarm as _llm_prewarm
+    _llm_prewarm()
+except Exception:                                                    # pragma: no cover
+    pass
+
+
 # Module-level ``demo`` --- required by Hugging Face Spaces, which does
 # ``from gradio_app import demo`` (or ``from app import demo`` via the
 # tiny app.py shim). Building it here at import time keeps the launch

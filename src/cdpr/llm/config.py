@@ -72,7 +72,11 @@ class LLMConfig:
     model: str = ""
     api_key: str = ""
     base_url: str = ""
-    timeout_s: float = 30.0
+    # Tightened 30s -> 12s. The Gemini and OpenRouter free tiers
+    # respond in 1-3s on warm connections. A 30s ceiling only made the
+    # fallback chain feel slow when the primary stalled. Override via
+    # CDPR_LLM_TIMEOUT_S when running on a slow link.
+    timeout_s: float = 12.0
     extra: dict[str, object] = field(default_factory=dict)
 
     @classmethod
@@ -90,6 +94,12 @@ class LLMConfig:
                 f"Choose from: {', '.join(PROVIDER_NAMES)}"
             )
         cfg = cls(provider=name, model=DEFAULT_MODELS[name])
+        # Honour CDPR_LLM_TIMEOUT_S override so heavy users can dial
+        # back when running on a slow connection.
+        try:
+            cfg.timeout_s = float(os.environ.get("CDPR_LLM_TIMEOUT_S", cfg.timeout_s))
+        except ValueError:
+            pass
         if name == "gemini":
             cfg.api_key = os.environ.get(GEMINI_API_KEY_ENV, "")
             cfg.model = os.environ.get("GEMINI_MODEL", cfg.model)

@@ -62,6 +62,45 @@ def _redact(text: str) -> str:
     return out
 
 
+# Two layers of caching that turn most repeated chats into instant
+# responses without changing any external behaviour:
+#
+#   _provider_cache  : keyed on provider name, holds the constructed
+#                      provider object so HF Spaces doesn't re-run
+#                      __init__ (which costs ~hundreds of ms on cold
+#                      worker; no-op on a warm one).
+#   _response_cache  : keyed on (provider chain, description), holds the
+#                      BuilderResult so the SAME prompt typed twice in
+#                      one session returns instantly. Bounded to 32
+#                      entries to avoid unbounded memory growth.
+_provider_cache: dict[str, Any] = {}
+_response_cache: dict[tuple[str, str], "BuilderResult"] = {}
+_RESPONSE_CACHE_MAX = 32
+
+
+def _cached_provider(name: str):
+    cached = _provider_cache.get(name)
+    if cached is not None:
+        return cached
+    built = build_provider(name)
+    _provider_cache[name] = built
+    return built
+
+
+def prewarm(chain: list[str] | None = None) -> list[str]:
+    """Instantiate every provider in the chain at app boot so the first
+    user chat doesn't pay construction cost. Returns the names that
+    actually built. Safe to call from gradio_app's module load."""
+    built: list[str] = []
+    for name in (chain or resolve_fallback_chain()):
+        try:
+            _cached_provider(name)
+            built.append(name)
+        except LLMUnavailableError:
+            continue
+    return built
+
+
 _SYSTEM_PROMPT = """\
 You are a parser for the CDPR Simulator. Convert the user's free-text
 description of a Cable-Driven Parallel Robot experiment into a JSON
@@ -137,6 +176,14 @@ def describe_to_request(
     else:
         chain = list(fallback_chain or resolve_fallback_chain())
 
+    # Response-cache fast path. Keyed on the chain so a config change
+    # busts stale entries; temperature is fixed at 0 inside this module
+    # so identical inputs are guaranteed to map to identical outputs.
+    cache_key = (",".join(chain), description.strip())
+    cached = _response_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     messages = [
         LLMMessage(role="system", content=_SYSTEM_PROMPT),
         LLMMessage(role="user", content=description.strip()),
@@ -151,7 +198,7 @@ def describe_to_request(
     for name in chain:
         tried.append(name)
         try:
-            llm = build_provider(name)
+            llm = _cached_provider(name)
         except LLMUnavailableError as exc:
             notes.append(
                 f"Provider {name!r} unavailable at construction: "
@@ -160,7 +207,12 @@ def describe_to_request(
             continue
 
         try:
-            resp = llm.complete(messages, max_tokens=900, temperature=0.0)
+            # max_tokens dropped 900 -> 400. The JSON we expect is well
+            # under 200 tokens; the extra budget only added wall time on
+            # providers that generate up to the cap. temperature is 0 so
+            # the same description yields the same JSON, which lets the
+            # cache below short-circuit duplicate calls within a session.
+            resp = llm.complete(messages, max_tokens=400, temperature=0.0)
         except LLMUnavailableError as exc:
             notes.append(
                 f"Provider {name!r} call failed: {_redact(str(exc))}. "
@@ -193,7 +245,7 @@ def describe_to_request(
     if tried:
         notes.append("Provider chain tried: " + " -> ".join(tried))
 
-    return BuilderResult(
+    result = BuilderResult(
         request=request,
         provider=winner_provider,
         model=winner_model,
@@ -202,6 +254,17 @@ def describe_to_request(
         follow_up_questions=list(parsed.get("follow_up_questions", []) or []),
         notes=notes,
     )
+
+    # Populate the cache so the same prompt typed twice returns instantly.
+    # FIFO eviction keeps the cache bounded. Only cache HIGH-confidence
+    # results --- a low-confidence default is a fallback we want to
+    # retry on the next attempt in case the provider has come back up.
+    if confidence == "high":
+        if len(_response_cache) >= _RESPONSE_CACHE_MAX:
+            _response_cache.pop(next(iter(_response_cache)))
+        _response_cache[cache_key] = result
+
+    return result
 
 
 def _extract_json(text: str) -> dict[str, Any]:

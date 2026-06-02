@@ -302,6 +302,460 @@ def train_val_split(X: np.ndarray, y: np.ndarray, val_frac: float
 
 
 # ---------------------------------------------------------------------------
+# Phase-2 artefact bundle
+# ---------------------------------------------------------------------------
+# A single helper every model path calls before returning. It emits at
+# least ten figures and three tables per run, gating each figure on
+# whether its required inputs are present so the same function works
+# for supervised, replay, and RL runs without branching at the call
+# site. Every plot is wrapped so one failure (e.g. degenerate data)
+# never brings the bundle down --- the directive's 'never crash' rule.
+
+
+def _safe_save(out_dir: "Path", name: str, fn, log: list[str]) -> None:
+    import matplotlib.pyplot as plt
+    path = out_dir / f"{name}.png"
+    try:
+        fig = fn()
+        fig.savefig(path, dpi=140, bbox_inches="tight")
+        plt.close(fig)
+        log.append(name)
+    except Exception as exc:                                          # noqa: BLE001
+        try:
+            plt.close("all")
+        except Exception:                                              # pragma: no cover
+            pass
+        print(f"  [{name:24s}] FAILED  {type(exc).__name__}: {exc}")
+
+
+def _emit_phase2_bundle(
+    out_dir: "Path",
+    *,
+    model_name: str,
+    y_true: "np.ndarray | None" = None,
+    y_pred: "np.ndarray | None" = None,
+    t: "np.ndarray | None" = None,
+    train_losses: "list[float] | None" = None,
+    val_losses: "list[float] | None" = None,
+    physics_losses: "list[float] | None" = None,
+    rewards: "list[float] | None" = None,
+    episode_lengths: "list[int] | None" = None,
+    t_min_bound: float = 0.0,
+    t_max_bound: float = 0.0,
+    metrics: dict | None = None,
+    extra_meta: dict | None = None,
+) -> list[str]:
+    """Render every applicable figure and table into ``out_dir``.
+
+    Returns the list of artefact base-names created (without
+    extensions). Designed so any caller can pass whatever subset of
+    arrays it has and get the largest possible bundle out.
+    """
+    import matplotlib.pyplot as plt
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log: list[str] = []
+    title_suffix = f" ({model_name.upper()})"
+
+    # 1. Training loss --- always emit, even RL runs (rewards-as-loss).
+    def _f_loss():
+        fig, ax = plt.subplots(figsize=(6.0, 3.5))
+        if train_losses:
+            ax.plot(train_losses, label="train")
+        if val_losses:
+            ax.plot(val_losses, label="val")
+        if physics_losses:
+            ax.plot(physics_losses, "--", label="physics")
+        if rewards is not None and not train_losses:
+            ax.plot(rewards, "o-", label="eval return", color="C2")
+            ax.set_ylabel("return")
+        else:
+            ax.set_ylabel("MSE")
+        ax.set_xlabel("epoch / episode")
+        ax.set_title("Training curve" + title_suffix)
+        ax.legend(); ax.grid(True, alpha=0.3)
+        return fig
+    _safe_save(out_dir, "loss", _f_loss, log)
+
+    # 2. Log-scale loss --- reveals plateaus the linear plot hides.
+    if train_losses or val_losses:
+        def _f_loss_log():
+            fig, ax = plt.subplots(figsize=(6.0, 3.5))
+            if train_losses:
+                ax.semilogy(train_losses, label="train")
+            if val_losses:
+                ax.semilogy(val_losses, label="val")
+            if physics_losses:
+                ax.semilogy(physics_losses, "--", label="physics")
+            ax.set_xlabel("epoch"); ax.set_ylabel("MSE (log)")
+            ax.set_title("Training curve, log-scale" + title_suffix)
+            ax.legend(); ax.grid(True, which="both", alpha=0.3)
+            return fig
+        _safe_save(out_dir, "loss_log", _f_loss_log, log)
+
+    # 3. Prediction vs truth over time (one trace per cable).
+    if y_true is not None and y_pred is not None and t is not None:
+        def _f_pred():
+            n_c = y_true.shape[1]
+            fig, ax = plt.subplots(figsize=(7.0, 4.0))
+            for k in range(n_c):
+                ax.plot(t, y_true[:, k], color=f"C{k % 10}", alpha=0.5)
+                ax.plot(t, y_pred[:, k], color=f"C{k % 10}", linestyle="--")
+            ax.set_xlabel("time t [s]"); ax.set_ylabel("cable tension [N]")
+            ax.set_title("Prediction (--) vs truth (—)" + title_suffix)
+            ax.grid(True, alpha=0.3)
+            return fig
+        _safe_save(out_dir, "pred_vs_truth", _f_pred, log)
+
+    # 4. Residual histogram + per-cable boxplot.
+    if y_true is not None and y_pred is not None:
+        residual = (y_pred - y_true).reshape(-1)
+        n_c = y_true.shape[1]
+        def _f_res():
+            fig, axes = plt.subplots(1, 2, figsize=(8.0, 3.5))
+            axes[0].hist(residual, bins=50, color="C3", edgecolor="black", alpha=0.85)
+            axes[0].set_xlabel("error [N]")
+            axes[0].set_title("Residual histogram")
+            axes[0].axvline(0, color="black", lw=0.8)
+            axes[1].boxplot([y_pred[:, k] - y_true[:, k] for k in range(n_c)],
+                            tick_labels=[f"c{k+1}" for k in range(n_c)])
+            axes[1].set_ylabel("error [N]")
+            axes[1].set_title("Per-cable residual")
+            axes[1].axhline(0, color="black", lw=0.6)
+            return fig
+        _safe_save(out_dir, "residuals", _f_res, log)
+
+    # 5. Per-cable RMSE / MAE bar chart.
+    if y_true is not None and y_pred is not None:
+        def _f_per_cable():
+            n_c = y_true.shape[1]
+            rmse = [float(np.sqrt(np.mean((y_pred[:, k] - y_true[:, k]) ** 2)))
+                    for k in range(n_c)]
+            mae = [float(np.mean(np.abs(y_pred[:, k] - y_true[:, k])))
+                   for k in range(n_c)]
+            idx = np.arange(n_c); w = 0.35
+            fig, ax = plt.subplots(figsize=(6.5, 3.5))
+            ax.bar(idx - w/2, rmse, w, label="RMSE", color="C0")
+            ax.bar(idx + w/2, mae,  w, label="MAE",  color="C1")
+            ax.set_xticks(idx); ax.set_xticklabels([f"c{k+1}" for k in range(n_c)])
+            ax.set_ylabel("error [N]")
+            ax.set_title("Per-cable RMSE & MAE" + title_suffix)
+            ax.legend(); ax.grid(True, axis="y", alpha=0.3)
+            return fig
+        _safe_save(out_dir, "cable_rmse_bar", _f_per_cable, log)
+
+    # 6. Predicted-vs-true scatter with y = x reference.
+    if y_true is not None and y_pred is not None:
+        def _f_scatter():
+            n_c = y_true.shape[1]
+            cols = min(4, n_c); rows = int(np.ceil(n_c / cols))
+            fig, axes = plt.subplots(rows, cols,
+                                      figsize=(2.6 * cols, 2.4 * rows),
+                                      sharex=True, sharey=True, squeeze=False)
+            for k in range(n_c):
+                ax = axes[k // cols, k % cols]
+                ax.scatter(y_true[:, k], y_pred[:, k], s=3, alpha=0.4,
+                           color=f"C{k % 10}")
+                lo = float(min(y_true[:, k].min(), y_pred[:, k].min()))
+                hi = float(max(y_true[:, k].max(), y_pred[:, k].max()))
+                ax.plot([lo, hi], [lo, hi], "k--", lw=0.8)
+                ax.set_title(f"c{k+1}", fontsize=9)
+            for k in range(n_c, rows * cols):
+                axes[k // cols, k % cols].axis("off")
+            fig.supxlabel("truth [N]"); fig.supylabel("prediction [N]")
+            fig.suptitle("Predicted vs true tensions" + title_suffix, y=1.02)
+            return fig
+        _safe_save(out_dir, "pred_vs_truth_scatter", _f_scatter, log)
+
+    # 7. Error distribution diagnostics (overall + Q-Q normal).
+    if y_true is not None and y_pred is not None:
+        residual = (y_pred - y_true).reshape(-1)
+        def _f_dist():
+            fig, axes = plt.subplots(1, 2, figsize=(8.0, 3.5))
+            axes[0].hist(residual, bins=60, density=True,
+                          color="C3", alpha=0.85, edgecolor="black")
+            axes[0].set_xlabel("error [N]"); axes[0].set_ylabel("density")
+            axes[0].set_title("Residual density")
+            mu, sigma = float(residual.mean()), float(residual.std() or 1.0)
+            xs = np.linspace(residual.min(), residual.max(), 200)
+            axes[0].plot(xs, (1.0 / (sigma * np.sqrt(2 * np.pi)))
+                          * np.exp(-0.5 * ((xs - mu) / sigma) ** 2),
+                          "k--", lw=1.0,
+                          label=f"N(mu={mu:.2f}, sigma={sigma:.2f})")
+            axes[0].legend(fontsize=8)
+            sample = np.sort(residual)
+            theo = np.linspace(-3, 3, sample.size)
+            theo_q = mu + sigma * theo
+            axes[1].plot(theo_q, sample, ".", ms=2, color="C0")
+            mn, mx = float(theo_q.min()), float(theo_q.max())
+            axes[1].plot([mn, mx], [mn, mx], "k--", lw=0.8)
+            axes[1].set_xlabel("normal quantile"); axes[1].set_ylabel("residual quantile")
+            axes[1].set_title("Q-Q vs normal")
+            return fig
+        _safe_save(out_dir, "error_distribution", _f_dist, log)
+
+    # 8. Cumulative RMSE evolution along the dataset.
+    if y_true is not None and y_pred is not None and t is not None:
+        def _f_evol():
+            per_step = np.linalg.norm(y_pred - y_true, axis=1)
+            cum = np.sqrt(np.cumsum(per_step ** 2) / np.arange(1, per_step.size + 1))
+            fig, ax = plt.subplots(figsize=(6.5, 3.2))
+            ax.plot(t, cum, color="C3")
+            ax.set_xlabel("time t [s]")
+            ax.set_ylabel("cumulative RMSE [N]")
+            ax.set_title("RMSE evolution" + title_suffix)
+            ax.grid(True, alpha=0.3)
+            return fig
+        _safe_save(out_dir, "error_evolution", _f_evol, log)
+
+    # 9. Tension-feasibility band (predictions vs. cable bounds).
+    if y_pred is not None and t is not None and t_max_bound > t_min_bound:
+        def _f_feas():
+            fig, ax = plt.subplots(figsize=(6.5, 3.2))
+            n_c = y_pred.shape[1]
+            for k in range(n_c):
+                ax.plot(t, y_pred[:, k], color=f"C{k % 10}", alpha=0.7, lw=0.8)
+            ax.axhline(t_min_bound, color="black", ls="--", lw=0.8,
+                        label=f"t_min = {t_min_bound:.1f} N")
+            ax.axhline(t_max_bound, color="black", ls=":", lw=0.8,
+                        label=f"t_max = {t_max_bound:.1f} N")
+            ax.fill_between([t[0], t[-1]], t_min_bound, t_max_bound,
+                             alpha=0.05, color="green")
+            ax.set_xlabel("time t [s]")
+            ax.set_ylabel("predicted tension [N]")
+            ax.set_title("Predicted tension feasibility" + title_suffix)
+            ax.legend(loc="best", fontsize=8); ax.grid(True, alpha=0.3)
+            return fig
+        _safe_save(out_dir, "tension_feasibility", _f_feas, log)
+
+    # 10. Per-cable absolute error heatmap (time x cable).
+    if y_true is not None and y_pred is not None and t is not None:
+        def _f_heat():
+            err = np.abs(y_pred - y_true).T                              # (n_c, n)
+            fig, ax = plt.subplots(figsize=(7.0, 3.4))
+            im = ax.imshow(err, aspect="auto", cmap="magma",
+                            extent=[float(t[0]), float(t[-1]),
+                                    err.shape[0] + 0.5, 0.5],
+                            interpolation="nearest")
+            ax.set_yticks(np.arange(1, err.shape[0] + 1))
+            ax.set_yticklabels([f"c{k+1}" for k in range(err.shape[0])])
+            ax.set_xlabel("time t [s]"); ax.set_ylabel("cable")
+            ax.set_title("Per-cable absolute error" + title_suffix)
+            fig.colorbar(im, ax=ax, label="|error| [N]")
+            return fig
+        _safe_save(out_dir, "error_heatmap", _f_heat, log)
+
+    # 11-16. RL-specific bundle. The reward array alone supports a
+    # rich set of policy-evaluation figures; we lean into them so that
+    # PPO / SAC runs --- which lack per-step y_true/y_pred --- still
+    # exit with >= 10 total artefacts.
+    if rewards is not None and len(rewards) > 0:
+        r = np.asarray(rewards, dtype=np.float64)
+        n_ep = len(r)
+        ep_idx = np.arange(1, n_ep + 1)
+
+        # 11a. Per-episode return + distribution
+        def _f_rl_dist():
+            fig, axes = plt.subplots(1, 2, figsize=(8.0, 3.2))
+            axes[0].bar(ep_idx, r, color="C2")
+            axes[0].set_xlabel("episode"); axes[0].set_ylabel("return")
+            axes[0].set_title("Per-episode return" + title_suffix)
+            axes[0].grid(True, axis="y", alpha=0.3)
+            axes[1].hist(r, bins=max(5, n_ep // 2),
+                          color="C2", edgecolor="black", alpha=0.85)
+            axes[1].set_xlabel("return"); axes[1].set_ylabel("count")
+            axes[1].set_title("Return distribution")
+            return fig
+        _safe_save(out_dir, "rl_returns", _f_rl_dist, log)
+
+        # 11b. Cumulative return
+        def _f_cum():
+            fig, ax = plt.subplots(figsize=(6.5, 3.2))
+            ax.plot(ep_idx, np.cumsum(r), "-o", color="C0")
+            ax.set_xlabel("episode"); ax.set_ylabel("cumulative return")
+            ax.set_title("Cumulative return" + title_suffix)
+            ax.grid(True, alpha=0.3)
+            return fig
+        _safe_save(out_dir, "rl_cumulative_return", _f_cum, log)
+
+        # 11c. Running mean ± std (sliding window)
+        def _f_rolling():
+            w = max(2, min(n_ep // 3, 25))
+            roll_mean = np.convolve(r, np.ones(w) / w, mode="valid")
+            x_roll = np.arange(w, n_ep + 1)
+            roll_std = np.array([float(r[i - w:i].std())
+                                  for i in x_roll])
+            fig, ax = plt.subplots(figsize=(6.5, 3.2))
+            ax.plot(ep_idx, r, ".", color="C2", alpha=0.4, label="return")
+            ax.plot(x_roll, roll_mean, "-", color="C3", label=f"rolling mean (w={w})")
+            ax.fill_between(x_roll, roll_mean - roll_std, roll_mean + roll_std,
+                             alpha=0.2, color="C3", label="±1 std")
+            ax.set_xlabel("episode"); ax.set_ylabel("return")
+            ax.set_title("Return rolling statistics" + title_suffix)
+            ax.legend(loc="best", fontsize=8); ax.grid(True, alpha=0.3)
+            return fig
+        _safe_save(out_dir, "rl_rolling_return", _f_rolling, log)
+
+        # 11d. Return Q-Q vs normal (sanity for stationarity claims)
+        def _f_qq():
+            sort_r = np.sort(r)
+            theo = np.linspace(-2.5, 2.5, n_ep)
+            mu, sigma = float(r.mean()), float(r.std() or 1.0)
+            fig, ax = plt.subplots(figsize=(5.0, 3.2))
+            ax.plot(mu + sigma * theo, sort_r, "o", color="C0", ms=4)
+            lo, hi = float(sort_r.min()), float(sort_r.max())
+            ax.plot([lo, hi], [lo, hi], "k--", lw=0.8)
+            ax.set_xlabel("normal quantile"); ax.set_ylabel("return quantile")
+            ax.set_title("Return Q-Q vs normal" + title_suffix)
+            return fig
+        _safe_save(out_dir, "rl_return_qq", _f_qq, log)
+
+        # 11e. Return box + violin in one panel
+        def _f_box():
+            fig, axes = plt.subplots(1, 2, figsize=(7.0, 3.2))
+            axes[0].boxplot([r], tick_labels=["return"])
+            axes[0].set_title("Return box")
+            axes[0].grid(True, axis="y", alpha=0.3)
+            axes[1].violinplot([r], showmeans=True, showmedians=True)
+            axes[1].set_xticks([1]); axes[1].set_xticklabels(["return"])
+            axes[1].set_title("Return violin")
+            axes[1].grid(True, axis="y", alpha=0.3)
+            return fig
+        _safe_save(out_dir, "rl_return_box_violin", _f_box, log)
+
+        # 11g. First-half vs second-half learning check.
+        def _f_split():
+            half = n_ep // 2
+            if half < 2:
+                raise ValueError("need >= 4 episodes for split comparison")
+            first, second = r[:half], r[half:]
+            fig, axes = plt.subplots(1, 2, figsize=(7.5, 3.2))
+            axes[0].hist([first, second], bins=max(4, n_ep // 4),
+                          color=["C7", "C2"],
+                          label=["first half", "second half"], alpha=0.85)
+            axes[0].set_xlabel("return"); axes[0].set_ylabel("count")
+            axes[0].set_title("Learning split: first vs second half")
+            axes[0].legend(loc="best", fontsize=8)
+            axes[1].bar(["first", "second"],
+                        [float(first.mean()), float(second.mean())],
+                        yerr=[float(first.std()), float(second.std())],
+                        color=["C7", "C2"], capsize=4)
+            axes[1].set_ylabel("mean return ± std")
+            axes[1].set_title(f"Improvement: "
+                              f"{float(second.mean()) - float(first.mean()):+.3f}")
+            return fig
+        _safe_save(out_dir, "rl_learning_split", _f_split, log)
+
+        # 11f. Summary metrics as a text figure (saves to PNG so it
+        #      appears in the Gallery alongside the others).
+        def _f_summary_fig():
+            fig, ax = plt.subplots(figsize=(6.0, 3.5))
+            ax.axis("off")
+            stats = [
+                ("episodes",      f"{n_ep}"),
+                ("mean return",   f"{float(r.mean()):+.4f}"),
+                ("std return",    f"{float(r.std()):.4f}"),
+                ("min return",    f"{float(r.min()):+.4f}"),
+                ("max return",    f"{float(r.max()):+.4f}"),
+                ("median return", f"{float(np.median(r)):+.4f}"),
+                ("IQR",           f"{float(np.percentile(r, 75) - np.percentile(r, 25)):.4f}"),
+                ("best episode",  f"#{int(np.argmax(r)) + 1}"),
+            ]
+            txt = "\n".join(f"  {k:18s} {v}" for k, v in stats)
+            ax.text(0.05, 0.95, "Evaluation summary" + title_suffix,
+                     transform=ax.transAxes, fontsize=12, weight="bold",
+                     va="top")
+            ax.text(0.05, 0.80, txt, transform=ax.transAxes,
+                     fontsize=10, family="monospace", va="top")
+            return fig
+        _safe_save(out_dir, "rl_summary_panel", _f_summary_fig, log)
+
+    # ---- Tables ----------------------------------------------------
+    summary_rows: list[tuple[str, str]] = []
+    if metrics:
+        for k, v in metrics.items():
+            if isinstance(v, (int, float, str, bool)):
+                summary_rows.append((str(k), f"{v}"))
+
+    # T1. metrics_table.md
+    try:
+        lines = [
+            "# Phase-2 run metrics",
+            "",
+            f"**Model**: `{model_name}`  ",
+            f"**Created**: `{time.strftime('%Y-%m-%dT%H:%M:%S')}`",
+            "",
+            "| Metric | Value |",
+            "|---|---|",
+        ]
+        for k, v in summary_rows:
+            lines.append(f"| `{k}` | {v} |")
+        if extra_meta:
+            lines += ["", "## Run metadata", "",
+                       "| Key | Value |", "|---|---|"]
+            for k, v in extra_meta.items():
+                lines.append(f"| `{k}` | {v} |")
+        (out_dir / "metrics_table.md").write_text("\n".join(lines),
+                                                    encoding="utf-8")
+        log.append("metrics_table")
+    except Exception as exc:                                          # noqa: BLE001
+        print(f"  [metrics_table.md       ] FAILED  {exc}")
+
+    # T2. per_cable_table.csv
+    try:
+        if y_true is not None and y_pred is not None:
+            n_c = y_true.shape[1]
+            rows = ["cable,rmse_N,mae_N,peak_err_N,mean_truth_N,mean_pred_N"]
+            for k in range(n_c):
+                d = y_pred[:, k] - y_true[:, k]
+                rows.append(
+                    f"c{k+1},{float(np.sqrt(np.mean(d**2))):.6f},"
+                    f"{float(np.mean(np.abs(d))):.6f},"
+                    f"{float(np.max(np.abs(d))):.6f},"
+                    f"{float(np.mean(y_true[:, k])):.6f},"
+                    f"{float(np.mean(y_pred[:, k])):.6f}"
+                )
+            (out_dir / "per_cable_table.csv").write_text("\n".join(rows),
+                                                          encoding="utf-8")
+            log.append("per_cable_table")
+    except Exception as exc:                                          # noqa: BLE001
+        print(f"  [per_cable_table.csv    ] FAILED  {exc}")
+
+    # T3. summary.md --- human-readable single-page report.
+    try:
+        bits = [
+            f"# {model_name.upper()} run summary",
+            "",
+            f"Generated: `{time.strftime('%Y-%m-%dT%H:%M:%S')}`",
+            "",
+            f"Artefacts: {len(log)} ({len([n for n in log if 'table' not in n])} figures, "
+            f"{len([n for n in log if 'table' in n])} tables).",
+            "",
+        ]
+        if metrics:
+            bits += ["## Headline metrics", ""]
+            for k, v in summary_rows:
+                bits.append(f"- **{k}**: {v}")
+            bits.append("")
+        bits += ["## Figure index", ""]
+        for name in log:
+            if "table" not in name:
+                bits.append(f"- `{name}.png`")
+        bits.append("")
+        bits += ["## Table index", ""]
+        for name in log:
+            if "table" in name:
+                suffix = "md" if name == "metrics_table" else "csv"
+                bits.append(f"- `{name}.{suffix}`")
+        (out_dir / "summary.md").write_text("\n".join(bits), encoding="utf-8")
+        log.append("summary")
+    except Exception as exc:                                          # noqa: BLE001
+        print(f"  [summary.md             ] FAILED  {exc}")
+
+    print(f"  [bundle] {len(log)} artefacts written to {out_dir}")
+    return log
+
+
+# ---------------------------------------------------------------------------
 # Supervised workflow (MLP / PINN)
 # ---------------------------------------------------------------------------
 
@@ -409,47 +863,9 @@ def run_supervised(args, blocks: dict[str, np.ndarray], out_dir: Path) -> dict:
         yhat_norm = model(X_t)
         yhat = _denorm_y(yhat_norm).numpy()                          # back to Newtons
 
-    # Loss plot
-    fig, ax = plt.subplots(figsize=(6.0, 3.5))
-    ax.plot(train_losses, label="train")
-    if val_losses:
-        ax.plot(val_losses, label="val")
-    if physics_losses:
-        ax.plot(physics_losses, label="physics", linestyle="--")
-    ax.set_xlabel("epoch")
-    ax.set_ylabel("MSE")
-    ax.set_yscale("log")
-    ax.set_title(f"{args.model.upper()} training loss")
-    ax.legend()
-    fig.savefig(out_dir / "loss.png", dpi=160, bbox_inches="tight")
-    plt.close(fig)
-
-    # Prediction vs truth
-    t = blocks["time"]
+    t_arr = blocks["time"]
     n_cables = y.shape[1]
-    fig, ax = plt.subplots(figsize=(7.0, 4.0))
-    for k in range(n_cables):
-        ax.plot(t, y[:, k], color=f"C{k % 10}", alpha=0.5)
-        ax.plot(t, yhat[:, k], color=f"C{k % 10}", linestyle="--")
-    ax.set_xlabel(r"time $t$ [s]")
-    ax.set_ylabel("cable tension [N]")
-    ax.set_title(f"{args.model.upper()} prediction (dashed) vs truth (solid)")
-    fig.savefig(out_dir / "pred_vs_truth.png", dpi=160, bbox_inches="tight")
-    plt.close(fig)
-
-    # Residual distribution
     residual = (yhat - y).reshape(-1)
-    fig, axes = plt.subplots(1, 2, figsize=(8.0, 3.5))
-    axes[0].hist(residual, bins=50, color="C3")
-    axes[0].set_title("Residual histogram")
-    axes[0].set_xlabel("prediction error [N]")
-    axes[1].boxplot([yhat[:, k] - y[:, k] for k in range(n_cables)],
-                    tick_labels=[f"c{k+1}" for k in range(n_cables)])
-    axes[1].set_ylabel("error [N]")
-    axes[1].set_title("Per-cable residual")
-    fig.savefig(out_dir / "residuals.png", dpi=160, bbox_inches="tight")
-    plt.close(fig)
-
     rmse = float(np.sqrt(np.mean(residual ** 2)))
     mae = float(np.mean(np.abs(residual)))
     per_cable_rmse = [float(np.sqrt(np.mean((yhat[:, k] - y[:, k]) ** 2)))
@@ -465,6 +881,39 @@ def run_supervised(args, blocks: dict[str, np.ndarray], out_dir: Path) -> dict:
         "val_loss_last": float(val_losses[-1]) if val_losses else float("nan"),
         "training_runtime_s": round(runtime, 3),
     }
+    # Try to recover the tension bounds from the source manifest so the
+    # feasibility-band figure has the right limits to draw.
+    t_min_b = t_max_b = 0.0
+    try:
+        # Reach for the input CSV's sibling manifest.json if any.
+        src = Path(args.input)
+        sib = (src.parent if not str(src).startswith(("http://", "https://"))
+               else None)
+        if sib is not None and (sib / "manifest.json").exists():
+            man = json.loads((sib / "manifest.json").read_text(encoding="utf-8"))
+            limits = (man.get("robot") or {}).get("tension_limits") or {}
+            t_min_b = float(limits.get("t_min", 0.0) or 0.0)
+            t_max_b = float(limits.get("t_max", 0.0) or 0.0)
+    except Exception:                                                 # pragma: no cover
+        pass
+
+    _emit_phase2_bundle(
+        out_dir,
+        model_name=args.model,
+        y_true=y, y_pred=yhat, t=t_arr,
+        train_losses=list(train_losses),
+        val_losses=list(val_losses) if val_losses else None,
+        physics_losses=list(physics_losses) if physics_losses else None,
+        t_min_bound=t_min_b, t_max_bound=t_max_b,
+        metrics=metrics,
+        extra_meta={
+            "batch_size": args.batch_size,
+            "learning_rate": args.learning_rate,
+            "hidden_layers": args.hidden,
+            "val_frac": args.val_frac,
+            "seed": args.seed,
+        },
+    )
     return metrics
 
 
@@ -546,40 +995,39 @@ def run_replay(args, blocks: dict[str, np.ndarray], out_dir: Path,
     tens_err = tens_rep - tens_csv
     pos_err = np.linalg.norm(pos_rep - pos_csv, axis=1)
 
-    fig, ax = plt.subplots(figsize=(6.0, 3.5))
-    for k in range(tens_err.shape[1]):
-        ax.plot(t_rep, tens_err[:, k], label=f"c{k+1}")
-    ax.set_xlabel(r"time $t$ [s]")
-    ax.set_ylabel("replay tension error [N]")
-    ax.set_title("Replay vs recorded cable tensions")
-    ax.legend(ncol=2, fontsize=8)
-    fig.savefig(out_dir / "pred_vs_truth.png", dpi=160, bbox_inches="tight")
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(6.0, 3.5))
-    ax.plot(t_rep, pos_err * 1e3, color="C3")
-    ax.set_xlabel(r"time $t$ [s]")
-    ax.set_ylabel("position residual [mm]")
-    ax.set_title("Replay vs recorded position")
-    fig.savefig(out_dir / "residuals.png", dpi=160, bbox_inches="tight")
-    plt.close(fig)
-
-    # Placeholder loss plot so the comparison harness sees a uniform set.
-    fig, ax = plt.subplots(figsize=(6.0, 3.0))
-    ax.text(0.5, 0.5, "replay path: no training loss",
-            ha="center", va="center", transform=ax.transAxes)
-    ax.set_axis_off()
-    fig.savefig(out_dir / "loss.png", dpi=160, bbox_inches="tight")
-    plt.close(fig)
-
     rmse_t = float(np.sqrt(np.mean(tens_err ** 2)))
-    return {
+    metrics = {
         "model": "replay",
         "samples": int(len(t_rep)),
         "tension_rmse_N": rmse_t,
         "tension_mae_N": float(np.mean(np.abs(tens_err))),
         "position_rmse_mm": float(np.sqrt(np.mean(pos_err ** 2)) * 1e3),
     }
+    # The replay 'prediction' IS the recorded tensions; truth is what
+    # the analytic simulator computed under the same trajectory. So
+    # pass tens_csv as y_true and tens_rep as y_pred (the model output).
+    t_min_b = t_max_b = 0.0
+    try:
+        if manifest_path and manifest_path.exists():
+            man = json.loads(manifest_path.read_text(encoding="utf-8"))
+            limits = (man.get("robot") or {}).get("tension_limits") or {}
+            t_min_b = float(limits.get("t_min", 0.0) or 0.0)
+            t_max_b = float(limits.get("t_max", 0.0) or 0.0)
+    except Exception:                                                 # pragma: no cover
+        pass
+
+    _emit_phase2_bundle(
+        out_dir,
+        model_name="replay",
+        y_true=tens_csv, y_pred=tens_rep, t=t_rep,
+        t_min_bound=t_min_b, t_max_bound=t_max_b,
+        metrics=metrics,
+        extra_meta={
+            "position_rmse_mm": metrics["position_rmse_mm"],
+            "source_manifest": str(manifest_path) if manifest_path else "none",
+        },
+    )
+    return metrics
 
 
 # ---------------------------------------------------------------------------
@@ -657,24 +1105,7 @@ def run_rl(args, blocks: dict[str, np.ndarray], out_dir: Path,
         print(f"  episode {ep+1}: return={total:.3f} steps={steps}")
     env.close()
 
-    fig, ax = plt.subplots(figsize=(6.0, 3.5))
-    ax.bar(range(1, len(rewards) + 1), rewards, color="C2")
-    ax.set_xlabel("episode")
-    ax.set_ylabel("return")
-    ax.set_title(f"{args.model.upper()} evaluation return ({args.rl_steps} train steps)")
-    fig.savefig(out_dir / "loss.png", dpi=160, bbox_inches="tight")
-    plt.close(fig)
-
-    # placeholder plots so the comparison harness sees a uniform asset set
-    for name in ("pred_vs_truth", "residuals"):
-        fig, ax = plt.subplots(figsize=(6.0, 3.0))
-        ax.text(0.5, 0.5, f"{args.model.upper()}: see returns plot",
-                ha="center", va="center", transform=ax.transAxes)
-        ax.set_axis_off()
-        fig.savefig(out_dir / f"{name}.png", dpi=160, bbox_inches="tight")
-        plt.close(fig)
-
-    return {
+    metrics = {
         "model": args.model,
         "eval_episodes": args.eval_episodes,
         "train_timesteps": args.rl_steps,
@@ -682,6 +1113,23 @@ def run_rl(args, blocks: dict[str, np.ndarray], out_dir: Path,
         "mean_return": float(np.mean(rewards)),
         "std_return": float(np.std(rewards)),
     }
+    # RL has no y_true / y_pred per timestep, so the bundle's RL branch
+    # picks up the rewards array and emits the returns figures, plus
+    # the metrics_table.md / summary.md tables.
+    _emit_phase2_bundle(
+        out_dir,
+        model_name=args.model,
+        rewards=rewards,
+        metrics=metrics,
+        extra_meta={
+            "rl_steps": args.rl_steps,
+            "eval_episodes": args.eval_episodes,
+            "robot": request.robot,
+            "trajectory_kind": request.trajectory.kind,
+            "seed": args.seed,
+        },
+    )
+    return metrics
 
 
 # ---------------------------------------------------------------------------
